@@ -14,8 +14,9 @@ app = FastAPI(title="Secured Markov Screener Engine")
 # ==========================================
 SECRET_KEY = os.environ.get("API_SECRET_KEY")
 
-async def verify_token(x_api_key: str = Header(...)):
-    if not SECRET_KEY or x_api_key != SECRET_KEY:
+# Changed to 'authorization' header to be more server-friendly
+async def verify_token(authorization: str = Header(...)):
+    if not SECRET_KEY or authorization != SECRET_KEY:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid or missing API Key")
 
 # ==========================================

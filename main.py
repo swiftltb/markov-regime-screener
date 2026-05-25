@@ -60,6 +60,10 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
         df = yf.download(ticker, period="1y", progress=False)
         if df.empty or len(df) < window: return None
         
+        # FIX: Flatten yfinance multi-index columns if they exist
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        
         df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
         df['Roll_Mom'] = df['Log_Ret'].rolling(window).sum()
         

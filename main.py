@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import pandas as pd
@@ -10,15 +10,20 @@ from concurrent.futures import ThreadPoolExecutor
 app = FastAPI(title="Secured Markov Screener Engine")
 
 # ==========================================
-# SECURITY RULE 1: RESTRICT FRONTEND ACCESS
+# SECURITY: API KEY VALIDATION
+# ==========================================
+SECRET_KEY = os.environ.get("API_SECRET_KEY")
+
+async def verify_token(x_api_key: str = Header(...)):
+    if not SECRET_KEY or x_api_key != SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid or missing API Key")
+
+# ==========================================
+# CORS SETUP
 # ==========================================
 origins = [
     "https://www.stockscreen.art",
-    "https://www.stockscreen.art/",
-    "https://stockscreen.art",
-    "https://stockscreen.art/",
-    "http://127.0.0.1:5500",
-    "http://localhost:3000"
+    "https://stockscreen.art"
 ]
 
 app.add_middleware(
@@ -28,16 +33,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ==========================================
-# SECURITY RULE 2: HIDE DATABASE CREDENTIALS
-# ==========================================
-DATABASE_CONNECTION_STRING = os.environ.get("DATABASE_URL")
-
-if DATABASE_CONNECTION_STRING:
-    print("Database credentials safely injected from cloud vault.")
-else:
-    print("Running in local memory mode without database tracking fallback.")
 
 # Global caches
 INDIVIDUAL_CACHE = {}
@@ -53,16 +48,13 @@ SCREENER_TICKERS = [
 
 def calculate_single_markov(ticker, window=20, threshold=0.012):
     try:
-        # 1. Fetch Price Data
         df = yf.download(ticker, period="1y", progress=False)
         if df.empty or len(df) < window: return None
         
-        # 2. Flatten and Normalize
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = [str(col).lower() for col in df.columns]
         
-        # 3. Calculate Markov Logic
         df['Log_Ret'] = np.log(df['close'] / df['close'].shift(1))
         df['Roll_Mom'] = df['Log_Ret'].rolling(window).sum()
         
@@ -89,7 +81,6 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
             else:
                 matrix[s][s] = 1.0
                 
-        # 4. Fetch Market Info
         ticker_obj = yf.Ticker(ticker)
         info = ticker_obj.info
         current_price = info.get('currentPrice') or info.get('regularMarketPrice') or 0.0
@@ -108,7 +99,6 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
             "transition_matrix": matrix,
             "trailing_return": round(trailing_return * 100, 2),
             "sample_days": int(len(df)),
-            # New Metrics
             "current_price": float(current_price),
             "year_high": float(year_high),
             "year_low": float(year_low),
@@ -118,7 +108,8 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
         print(f"Error computing math matrix for {ticker}: {str(e)}")
         return None
 
-@app.get("/api/screener")
+# Secured Endpoints
+@app.get("/api/screener", dependencies=[Depends(verify_token)])
 def get_top_screener():
     current_time = time.time()
     if SCREENER_CACHE["data"] and (current_time - SCREENER_CACHE["timestamp"] < CACHE_EXPIRY_SECONDS):
@@ -137,7 +128,7 @@ def get_top_screener():
     SCREENER_CACHE["timestamp"] = current_time
     return top_25
 
-@app.get("/api/regime")
+@app.get("/api/regime", dependencies=[Depends(verify_token)])
 def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.012):
     ticker_key = str(ticker).upper().strip()
     current_time = time.time()
@@ -148,7 +139,6 @@ def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.01
             return payload
             
     res = calculate_single_markov(ticker_key, window, threshold)
-    
     if not res: 
         raise HTTPException(status_code=404, detail=f"Ticker {ticker_key} data generation failed.")
         

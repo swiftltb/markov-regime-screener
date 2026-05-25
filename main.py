@@ -128,15 +128,23 @@ def get_top_screener():
 
 @app.get("/api/regime")
 def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.012):
-    ticker_key = ticker.upper().strip()
+    # Force absolute string normalization to prevent missing parameter loops
+    ticker_key = str(ticker).upper().strip()
     current_time = time.time()
     
     if ticker_key in INDIVIDUAL_CACHE:
         payload, ts = INDIVIDUAL_CACHE[ticker_key]
-        if current_time - ts < CACHE_EXPIRY_SECONDS: return payload
+        if current_time - ts < CACHE_EXPIRY_SECONDS: 
+            return payload
             
+    # Process the calculation vector directly 
     res = calculate_single_markov(ticker_key, window, threshold)
-    if not res: raise HTTPException(status_code=404, detail="Ticker lookup failed.")
+    
+    if not res or res is None: 
+        raise HTTPException(status_code=404, detail=f"Ticker {ticker_key} data layout generation failed.")
         
+    # Standardize the inner key to guarantee that upper match patterns align 
+    res["ticker"] = ticker_key
+    
     INDIVIDUAL_CACHE[ticker_key] = (res, current_time)
     return res

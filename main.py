@@ -12,7 +12,6 @@ app = FastAPI(title="Secured Markov Screener Engine")
 # ==========================================
 # SECURITY RULE 1: RESTRICT FRONTEND ACCESS
 # ==========================================
-# Broad origin support to bypass strict text-matching and trailing slash bugs
 origins = [
     "https://www.stockscreen.art",
     "https://www.stockscreen.art/",
@@ -40,7 +39,7 @@ if DATABASE_CONNECTION_STRING:
 else:
     print("Running in local memory mode without database tracking fallback.")
 
-# Global caches to prevent API rate limits
+# Global caches
 INDIVIDUAL_CACHE = {}
 SCREENER_CACHE = {"data": None, "timestamp": 0}
 CACHE_EXPIRY_SECONDS = 3600  
@@ -54,17 +53,16 @@ SCREENER_TICKERS = [
 
 def calculate_single_markov(ticker, window=20, threshold=0.012):
     try:
+        # 1. Fetch Price Data
         df = yf.download(ticker, period="1y", progress=False)
         if df.empty or len(df) < window: return None
         
-        # 1. Flatten yfinance multi-index columns if they exist
+        # 2. Flatten and Normalize
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-            
-        # 2. Force all column names to lowercase to prevent 'Close' vs 'close' errors
         df.columns = [str(col).lower() for col in df.columns]
         
-        # 3. Calculate metrics using normalized lowercase keys
+        # 3. Calculate Markov Logic
         df['Log_Ret'] = np.log(df['close'] / df['close'].shift(1))
         df['Roll_Mom'] = df['Log_Ret'].rolling(window).sum()
         
@@ -91,7 +89,15 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
             else:
                 matrix[s][s] = 1.0
                 
-        # Handle index extractions securely across pandas versions
+        # 4. Fetch Market Info
+        ticker_obj = yf.Ticker(ticker)
+        info = ticker_obj.info
+        current_price = info.get('currentPrice') or info.get('regularMarketPrice') or 0.0
+        year_high = info.get('fiftyTwoWeekHigh') or 0.0
+        year_low = info.get('fiftyTwoWeekLow') or 0.0
+        target_mean = info.get('targetMeanPrice') or current_price
+        regime_score = round(((target_mean / current_price) - 1) * 100, 2) if current_price > 0 else 0.0
+        
         current_state = df['State'].values[-1] if hasattr(df['State'], 'values') else df['State'].iloc[-1]
         trailing_return = float((df['close'].values[-1] / df['close'].values[0]) - 1)
         
@@ -101,7 +107,12 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
             "p_bull_bull": float(matrix['Bull']['Bull']),
             "transition_matrix": matrix,
             "trailing_return": round(trailing_return * 100, 2),
-            "sample_days": int(len(df))
+            "sample_days": int(len(df)),
+            # New Metrics
+            "current_price": float(current_price),
+            "year_high": float(year_high),
+            "year_low": float(year_low),
+            "regime_score": regime_score
         }
     except Exception as e:
         print(f"Error computing math matrix for {ticker}: {str(e)}")
@@ -128,7 +139,6 @@ def get_top_screener():
 
 @app.get("/api/regime")
 def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.012):
-    # Force absolute string normalization to prevent missing parameter loops
     ticker_key = str(ticker).upper().strip()
     current_time = time.time()
     
@@ -137,14 +147,10 @@ def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.01
         if current_time - ts < CACHE_EXPIRY_SECONDS: 
             return payload
             
-    # Process the calculation vector directly 
     res = calculate_single_markov(ticker_key, window, threshold)
     
-    if not res or res is None: 
-        raise HTTPException(status_code=404, detail=f"Ticker {ticker_key} data layout generation failed.")
+    if not res: 
+        raise HTTPException(status_code=404, detail=f"Ticker {ticker_key} data generation failed.")
         
-    # Standardize the inner key to guarantee that upper match patterns align 
-    res["ticker"] = ticker_key
-    
     INDIVIDUAL_CACHE[ticker_key] = (res, current_time)
     return res

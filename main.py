@@ -4,7 +4,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
-import os  # <-- Standard library to read system environment variables
+import os  
 from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI(title="Secured Markov Screener Engine")
@@ -12,7 +12,7 @@ app = FastAPI(title="Secured Markov Screener Engine")
 # ==========================================
 # SECURITY RULE 1: RESTRICT FRONTEND ACCESS
 # ==========================================
-# We explicitly list every valid configuration variation of your domain name
+# Broad origin support to bypass strict text-matching and trailing slash bugs
 origins = [
     "https://www.stockscreen.art",
     "https://www.stockscreen.art/",
@@ -24,7 +24,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # Bypasses the strict single environment string lock
+    allow_origins=origins, 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,12 +33,9 @@ app.add_middleware(
 # ==========================================
 # SECURITY RULE 2: HIDE DATABASE CREDENTIALS
 # ==========================================
-# Grab the password/URL string directly out of Render's environment vault
 DATABASE_CONNECTION_STRING = os.environ.get("DATABASE_URL")
 
 if DATABASE_CONNECTION_STRING:
-    # Here is where your system would safely establish its tracking connection
-    # e.g., db.connect(DATABASE_CONNECTION_STRING)
     print("Database credentials safely injected from cloud vault.")
 else:
     print("Running in local memory mode without database tracking fallback.")
@@ -60,11 +57,15 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
         df = yf.download(ticker, period="1y", progress=False)
         if df.empty or len(df) < window: return None
         
-        # FIX: Flatten yfinance multi-index columns if they exist
+        # 1. Flatten yfinance multi-index columns if they exist
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+            
+        # 2. Force all column names to lowercase to prevent 'Close' vs 'close' errors
+        df.columns = [str(col).lower() for col in df.columns]
         
-        df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
+        # 3. Calculate metrics using normalized lowercase keys
+        df['Log_Ret'] = np.log(df['close'] / df['close'].shift(1))
         df['Roll_Mom'] = df['Log_Ret'].rolling(window).sum()
         
         def classify(val):
@@ -90,17 +91,20 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
             else:
                 matrix[s][s] = 1.0
                 
-        trailing_return = float((df['Close'].iloc[-1] / df['Close'].iloc[0]) - 1)
+        # Handle index extractions securely across pandas versions
+        current_state = df['State'].values[-1] if hasattr(df['State'], 'values') else df['State'].iloc[-1]
+        trailing_return = float((df['close'].values[-1] / df['close'].values[0]) - 1)
         
         return {
-            "ticker": ticker,
-            "current_regime": str(df['State'].iloc[-1]),
-            "p_bull_bull": matrix['Bull']['Bull'],
+            "ticker": str(ticker),
+            "current_regime": str(current_state),
+            "p_bull_bull": float(matrix['Bull']['Bull']),
             "transition_matrix": matrix,
             "trailing_return": round(trailing_return * 100, 2),
-            "sample_days": len(df)
+            "sample_days": int(len(df))
         }
-    except Exception:
+    except Exception as e:
+        print(f"Error computing math matrix for {ticker}: {str(e)}")
         return None
 
 @app.get("/api/screener")

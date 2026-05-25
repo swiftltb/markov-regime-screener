@@ -12,13 +12,19 @@ app = FastAPI(title="Secured Markov Screener Engine")
 # ==========================================
 # SECURITY RULE 1: RESTRICT FRONTEND ACCESS
 # ==========================================
-# Read the ALLOWED_ORIGIN variable from Render. 
-# If it's missing, default to localhost for safe development testing.
-FRONTEND_URL = os.environ.get("ALLOWED_ORIGIN", "http://127.0.0.1:5500")
+# We explicitly list every valid configuration variation of your domain name
+origins = [
+    "https://www.stockscreen.art",
+    "https://www.stockscreen.art/",
+    "https://stockscreen.art",
+    "https://stockscreen.art/",
+    "http://127.0.0.1:5500",
+    "http://localhost:3000"
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL], # Only your website domain can talk to this API now
+    allow_origins=origins,  # Bypasses the strict single environment string lock
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

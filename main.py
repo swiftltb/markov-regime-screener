@@ -48,7 +48,7 @@ SCREENER_TICKERS = [
 ]
 
 # ==========================================
-# ROBUST TECHNICAL INDICATOR CALCULATIONS
+# TECHNICAL INDICATOR CALCULATIONS
 # ==========================================
 
 def calculate_rsi(series, period=14):
@@ -100,40 +100,102 @@ def calculate_macd_signal_str(series, fast=12, slow=26, signal=9):
         return "Bullish Trend" if c_macd > c_sig else "Bearish Trend"
 
 # ==========================================
+# TRADING SIGNAL SYSTEM LOGIC
+# ==========================================
+
+def generate_trading_signal(regime, rsi, macd_str, current_price, atr):
+    """
+    Quant Matrix: Generates execution actions, stops, and price objectives 
+    by weaving together macro states with underlying technical structures.
+    """
+    try:
+        current_price = float(current_price)
+        rsi = float(rsi) if (rsi != "N/A" and not pd.isna(rsi)) else 50.0
+        atr = float(atr) if (atr != "N/A" and not pd.isna(atr)) else (current_price * 0.02)
+    except:
+        return {"action": "HOLD", "color": "#cbd5e1", "entry": "N/A", "stop": "N/A", "target": "N/A"}
+
+    # Establish neutral system default baselines
+    action = "HOLD"
+    color = "#cbd5e1" 
+    
+    # Mathematical Multipliers based on 14-day tracking Average True Range
+    stop_loss = round(current_price - (2.0 * atr), 2)
+    target_price = round(current_price + (3.5 * atr), 2)
+    suggested_entry = round(current_price, 2)
+
+    # 1. Condition Profile: STRONG BUY
+    if regime == "Bull" and rsi < 48 and "Bullish" in macd_str:
+        action = "STRONG BUY"
+        color = "#22c55e" 
+        suggested_entry = round(current_price, 2)
+        
+    # 2. Condition Profile: STANDARD BUY
+    elif regime == "Bull" and rsi < 65:
+        action = "BUY"
+        color = "#4ade80" 
+        suggested_entry = round(current_price, 2)
+
+    # 3. Condition Profile: RANGE ACCUMULATION (Mean-Reversion)
+    elif regime == "Sideways" and rsi < 38:
+        action = "ACCUMULATE"
+        color = "#00d4ff" 
+        suggested_entry = round(current_price * 0.995, 2) 
+        stop_loss = round(current_price - (1.5 * atr), 2) 
+
+    # 4. Condition Profile: EXHAUSTION OVERBOUGHT
+    elif rsi > 76:
+        action = "TAKE PROFIT"
+        color = "#eab308" 
+        stop_loss = round(current_price * 0.97, 2) 
+        target_price = "N/A"
+        suggested_entry = "N/A"
+
+    # 5. Condition Profile: STRONG BEARISH AVOID
+    elif regime == "Bear" and ("Bearish" in macd_str or rsi > 60):
+        action = "STRONG SELL / AVOID"
+        color = "#ef4444" 
+        suggested_entry = "N/A"
+        stop_loss = "N/A"
+        target_price = "N/A"
+
+    return {
+        "action": action,
+        "color": color,
+        "entry": f"${suggested_entry}" if suggested_entry != "N/A" else "N/A",
+        "stop": f"${stop_loss}" if stop_loss != "N/A" else "N/A",
+        "target": f"${target_price}" if target_price != "N/A" else "N/A"
+    }
+
+# ==========================================
 # CORE MARKOV REGIME MATHEMATICS PIPELINE
 # ==========================================
 
 def calculate_single_markov(ticker, window=20, threshold=0.012):
     try:
-        # FORCE group_by=False to completely flatten out potential MultiIndex column headers
         df = yf.download(ticker, period="1y", progress=False, group_by=False)
         if df.empty or len(df) < window: return None
         
-        # Aggressive clean up of multi-level indexing headers from yfinance
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(-1)
             
-        # Clean any whitespace out of text strings and cast to completely clean lowercase list
         df.columns = [str(col).strip().lower() for col in df.columns]
         
-        # Absolute backup rule: If 'adj close' exists but 'close' does not, clone it
         if 'adj close' in df.columns and 'close' not in df.columns:
             df['close'] = df['adj close']
             
-        # Enforce numeric conversion profiles explicitly
         df['close'] = pd.to_numeric(df['close'], errors='coerce').astype(float)
         df['high'] = pd.to_numeric(df['high'], errors='coerce').astype(float)
         df['low'] = pd.to_numeric(df['low'], errors='coerce').astype(float)
         
-        # Drop rows where critical calculations could choke on missing raw data rows
         df = df.dropna(subset=['close', 'high', 'low'])
         
-        # 1. Execute safe data extraction metrics on normalized tracking structures
+        # Calculate Micro Indicators
         latest_rsi = calculate_rsi(df['close'])
         latest_atr = calculate_atr(df)
         macd_desc = calculate_macd_signal_str(df['close'])
         
-        # 2. Existing Markov Calculations
+        # Markov Calculations Logic Array
         df['Log_Ret'] = np.log(df['close'] / df['close'].shift(1))
         df['Roll_Mom'] = df['Log_Ret'].rolling(window).sum()
         
@@ -171,6 +233,9 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
         current_state = df['State'].values[-1] if hasattr(df['State'], 'values') else df['State'].iloc[-1]
         trailing_return = float((df['close'].values[-1] / df['close'].values[0]) - 1)
         
+        # Core Signaling Interface
+        signal_data = generate_trading_signal(current_state, latest_rsi, macd_desc, current_price, latest_atr)
+        
         return {
             "ticker": str(ticker),
             "current_regime": str(current_state),
@@ -182,14 +247,12 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
             "year_high": float(year_high),
             "year_low": float(year_low),
             "regime_score": regime_score,
-            
-            # Formatted Indicator Sub-payload assignments
             "rsi": round(float(latest_rsi), 2) if (not pd.isna(latest_rsi) and not math.isnan(latest_rsi)) else "N/A",
             "atr": round(float(latest_atr), 2) if (not pd.isna(latest_atr) and not math.isnan(latest_atr)) else "N/A",
-            "macd_signal": str(macd_desc)
+            "macd_signal": str(macd_desc),
+            "trade_signal": signal_data
         }
     except Exception as e:
-        # Writes execution bugs to a tracking file inside your DreamHost project directory
         with open("indicator_error_log.txt", "a") as f:
             f.write(f"Error parsing calculations for {ticker}: {str(e)}\n")
         return None

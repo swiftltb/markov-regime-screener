@@ -8,7 +8,7 @@ import os
 import math
 from concurrent.futures import ThreadPoolExecutor
 
-app = FastAPI(title="Secured Markov Screener Engine")
+app = FastAPI(title="Secured Markov Screener Engine with Risk Profiles")
 
 # ==========================================
 # SECURITY: API KEY VALIDATION
@@ -46,6 +46,15 @@ SCREENER_TICKERS = [
     "XIU.TO", "CSU.TO", "TOI.TO", "LMN.TO", "SHOP.TO", "ATD.TO", "BN.TO", "CNQ.TO", 
     "CP.TO", "CNR.TO", "TD.TO", "RY.TO", "BMO.TO", "CCO.TO", "BCE.TO", "ENB.TO"
 ]
+
+# ==========================================
+# SYSTEM RISK PROFILES SPECIFICATION CONFIG
+# ==========================================
+RISK_MULTIPLIERS = {
+    "conservative": {"stop": 1.5, "target": 2.5, "buffer": 0.998},
+    "moderate":     {"stop": 2.0, "target": 3.5, "buffer": 1.000},
+    "aggressive":   {"stop": 3.0, "target": 5.0, "buffer": 1.002}
+}
 
 # ==========================================
 # TECHNICAL INDICATOR CALCULATIONS
@@ -103,64 +112,65 @@ def calculate_macd_signal_str(series, fast=12, slow=26, signal=9):
 # TRADING SIGNAL SYSTEM LOGIC
 # ==========================================
 
-def generate_trading_signal(regime, rsi, macd_str, current_price, atr):
+def generate_trading_signal(regime, rsi, macd_str, current_price, atr, risk_profile="moderate"):
     """
-    Quant Matrix: Generates execution actions, stops, and price objectives 
-    by weaving together macro states with underlying technical structures.
+    Quant Matrix v2: Computes dynamic risk boundaries by multiplying active 
+    asset ATR profiles against selected user safety metrics.
     """
     try:
         current_price = float(current_price)
         rsi = float(rsi) if (rsi != "N/A" and not pd.isna(rsi)) else 50.0
         atr = float(atr) if (atr != "N/A" and not pd.isna(atr)) else (current_price * 0.02)
+        
+        profile = str(risk_profile).lower().strip()
+        if profile not in RISK_MULTIPLIERS:
+            profile = "moderate"
     except:
         return {"action": "HOLD", "color": "#cbd5e1", "entry": "N/A", "stop": "N/A", "target": "N/A"}
 
-    # Establish neutral system default baselines
+    cfg = RISK_MULTIPLIERS[profile]
     action = "HOLD"
     color = "#cbd5e1" 
     
-    # Mathematical Multipliers based on 14-day tracking Average True Range
-    stop_loss = round(current_price - (2.0 * atr), 2)
-    target_price = round(current_price + (3.5 * atr), 2)
-    suggested_entry = round(current_price, 2)
+    # Calculate Risk Boundaries using Profile Multipliers
+    stop_loss = round(current_price - (cfg["stop"] * atr), 2)
+    target_price = round(current_price + (cfg["target"] * atr), 2)
+    suggested_entry = round(current_price * cfg["buffer"], 2)
 
-    # 1. Condition Profile: STRONG BUY
+    # 1. Profile: STRONG BUY
     if regime == "Bull" and rsi < 48 and "Bullish" in macd_str:
         action = "STRONG BUY"
-        color = "#22c55e" 
-        suggested_entry = round(current_price, 2)
+        color = "#22c55e"
         
-    # 2. Condition Profile: STANDARD BUY
+    # 2. Profile: BUY
     elif regime == "Bull" and rsi < 65:
         action = "BUY"
-        color = "#4ade80" 
-        suggested_entry = round(current_price, 2)
+        color = "#4ade80"
 
-    # 3. Condition Profile: RANGE ACCUMULATION (Mean-Reversion)
+    # 3. Profile: RANGE ACCUMULATION
     elif regime == "Sideways" and rsi < 38:
         action = "ACCUMULATE"
-        color = "#00d4ff" 
-        suggested_entry = round(current_price * 0.995, 2) 
-        stop_loss = round(current_price - (1.5 * atr), 2) 
+        color = "#00d4ff"
+        stop_loss = round(current_price - (max(1.0, cfg["stop"] - 0.5) * atr), 2) 
 
-    # 4. Condition Profile: EXHAUSTION OVERBOUGHT
+    # 4. Profile: EXHAUSTION
     elif rsi > 76:
         action = "TAKE PROFIT"
-        color = "#eab308" 
-        stop_loss = round(current_price * 0.97, 2) 
+        color = "#eab308"
+        stop_loss = round(current_price * 0.97, 2)
         target_price = "N/A"
         suggested_entry = "N/A"
 
-    # 5. Condition Profile: STRONG BEARISH AVOID
+    # 5. Profile: BEARISH AVOID
     elif regime == "Bear" and ("Bearish" in macd_str or rsi > 60):
         action = "STRONG SELL / AVOID"
-        color = "#ef4444" 
+        color = "#ef4444"
         suggested_entry = "N/A"
         stop_loss = "N/A"
         target_price = "N/A"
 
     return {
-        "action": action,
+        "action": f"{action}",
         "color": color,
         "entry": f"${suggested_entry}" if suggested_entry != "N/A" else "N/A",
         "stop": f"${stop_loss}" if stop_loss != "N/A" else "N/A",
@@ -171,14 +181,13 @@ def generate_trading_signal(regime, rsi, macd_str, current_price, atr):
 # CORE MARKOV REGIME MATHEMATICS PIPELINE
 # ==========================================
 
-def calculate_single_markov(ticker, window=20, threshold=0.012):
+def calculate_single_markov(ticker, window=20, threshold=0.012, risk_profile="moderate"):
     try:
         df = yf.download(ticker, period="1y", progress=False, group_by=False)
         if df.empty or len(df) < window: return None
         
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(-1)
-            
         df.columns = [str(col).strip().lower() for col in df.columns]
         
         if 'adj close' in df.columns and 'close' not in df.columns:
@@ -187,40 +196,32 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
         df['close'] = pd.to_numeric(df['close'], errors='coerce').astype(float)
         df['high'] = pd.to_numeric(df['high'], errors='coerce').astype(float)
         df['low'] = pd.to_numeric(df['low'], errors='coerce').astype(float)
-        
         df = df.dropna(subset=['close', 'high', 'low'])
         
-        # Calculate Micro Indicators
         latest_rsi = calculate_rsi(df['close'])
         latest_atr = calculate_atr(df)
         macd_desc = calculate_macd_signal_str(df['close'])
         
-        # Markov Calculations Logic Array
         df['Log_Ret'] = np.log(df['close'] / df['close'].shift(1))
         df['Roll_Mom'] = df['Log_Ret'].rolling(window).sum()
         
         def classify(val):
             if pd.isna(val): return 'Sideways'
-            if val > threshold: return 'Bull'
-            elif val < -threshold: return 'Bear'
-            return 'Sideways'
+            return 'Bull' if val > threshold else ('Bear' if val < -threshold else 'Sideways')
             
         df['State'] = df['Roll_Mom'].apply(classify)
         df['Next_State'] = df['State'].shift(-1)
         
         states = ['Bull', 'Sideways', 'Bear']
         matrix = {s: {next_s: 0.0 for next_s in states} for s in states}
-        
         for _, row in df.dropna(subset=['State', 'Next_State']).iterrows():
             matrix[row['State']][row['Next_State']] += 1.0
             
         for s in states:
             total = sum(matrix[s].values())
             if total > 0:
-                for next_s in states:
-                    matrix[s][next_s] = round(matrix[s][next_s] / total, 3)
-            else:
-                matrix[s][s] = 1.0
+                for next_s in states: matrix[s][next_s] = round(matrix[s][next_s] / total, 3)
+            else: matrix[s][s] = 1.0
                 
         ticker_obj = yf.Ticker(ticker)
         info = ticker_obj.info
@@ -229,27 +230,26 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
         year_low = info.get('fiftyTwoWeekLow') or df['close'].min() or 0.0
         target_mean = info.get('targetMeanPrice') or current_price
         regime_score = round(((target_mean / current_price) - 1) * 100, 2) if current_price > 0 else 0.0
-        
         current_state = df['State'].values[-1] if hasattr(df['State'], 'values') else df['State'].iloc[-1]
         trailing_return = float((df['close'].values[-1] / df['close'].values[0]) - 1)
         
-        # Core Signaling Interface
-        signal_data = generate_trading_signal(current_state, latest_rsi, macd_desc, current_price, latest_atr)
+        # Compute volatility signal with profile selection parameters
+        signal_data = generate_trading_signal(current_state, latest_rsi, macd_desc, current_price, latest_atr, risk_profile)
         
         return {
-            "ticker": str(ticker),
-            "current_regime": str(current_state),
+            "ticker": str(ticker), 
+            "current_regime": str(current_state), 
             "p_bull_bull": float(matrix['Bull']['Bull']),
-            "transition_matrix": matrix,
-            "trailing_return": round(trailing_return * 100, 2),
+            "transition_matrix": matrix, 
+            "trailing_return": round(trailing_return * 100, 2), 
             "sample_days": int(len(df)),
-            "current_price": float(current_price),
-            "year_high": float(year_high),
-            "year_low": float(year_low),
+            "current_price": float(current_price), 
+            "year_high": float(year_high), 
+            "year_low": float(year_low), 
             "regime_score": regime_score,
             "rsi": round(float(latest_rsi), 2) if (not pd.isna(latest_rsi) and not math.isnan(latest_rsi)) else "N/A",
             "atr": round(float(latest_atr), 2) if (not pd.isna(latest_atr) and not math.isnan(latest_atr)) else "N/A",
-            "macd_signal": str(macd_desc),
+            "macd_signal": str(macd_desc), 
             "trade_signal": signal_data
         }
     except Exception as e:
@@ -269,7 +269,7 @@ def get_top_screener():
         
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
-        computed = executor.map(calculate_single_markov, SCREENER_TICKERS)
+        computed = executor.map(lambda t: calculate_single_markov(t, risk_profile="moderate"), SCREENER_TICKERS)
         for res in computed:
             if res: results.append(res)
                 
@@ -281,8 +281,8 @@ def get_top_screener():
     return top_25
 
 @app.get("/api/regime", dependencies=[Depends(verify_token)])
-def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.012):
-    ticker_key = str(ticker).upper().strip()
+def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.012, risk: str = "moderate"):
+    ticker_key = f"{str(ticker).upper().strip()}_{risk.lower()}"
     current_time = time.time()
     
     if ticker_key in INDIVIDUAL_CACHE:
@@ -290,9 +290,9 @@ def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.01
         if current_time - ts < CACHE_EXPIRY_SECONDS: 
             return payload
             
-    res = calculate_single_markov(ticker_key, window, threshold)
+    res = calculate_single_markov(str(ticker).upper().strip(), window, threshold, risk)
     if not res: 
-        raise HTTPException(status_code=404, detail=f"Ticker {ticker_key} data generation failed.")
+        raise HTTPException(status_code=404, detail="Ticker data calculation failed.")
         
     INDIVIDUAL_CACHE[ticker_key] = (res, current_time)
     return res

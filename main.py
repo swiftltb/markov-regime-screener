@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import time
 import os  
+import math
 from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI(title="Secured Markov Screener Engine")
@@ -14,7 +15,6 @@ app = FastAPI(title="Secured Markov Screener Engine")
 # ==========================================
 SECRET_KEY = os.environ.get("API_SECRET_KEY")
 
-# Changed to 'authorization' header to be more server-friendly
 async def verify_token(authorization: str = Header(...)):
     if not SECRET_KEY or authorization != SECRET_KEY:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid or missing API Key")
@@ -47,6 +47,66 @@ SCREENER_TICKERS = [
     "CP.TO", "CNR.TO", "TD.TO", "RY.TO", "BMO.TO", "CCO.TO", "BCE.TO", "ENB.TO"
 ]
 
+# ==========================================
+# NEW: TECHNICAL INDICATOR CALCULATION ENGINE
+# ==========================================
+
+def calculate_rsi(prices_series, period=14):
+    """Calculates RSI using raw pandas series input."""
+    if len(prices_series) < period:
+        return np.nan
+    delta = prices_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
+    
+    rs = avg_gain / avg_loss
+    rsi_series = 100 - (100 / (1 + rs))
+    return rsi_series.iloc[-1]
+
+def calculate_atr(df, period=14):
+    """Calculates ATR matching common charting platforms."""
+    if len(df) < period:
+        return np.nan
+    high = df['high']
+    low = df['low']
+    close_prev = df['close'].shift(1)
+    
+    tr1 = high - low
+    tr2 = (high - close_prev).abs()
+    tr3 = (low - close_prev).abs()
+    
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_series = tr.ewm(alpha=1/period, min_periods=period).mean()
+    return atr_series.iloc[-1]
+
+def calculate_macd_signal_str(prices_series, fast=12, slow=26, signal=9):
+    """Calculates MACD trends and notes structural directional crossings."""
+    if len(prices_series) < slow + signal:
+        return "N/A"
+    fast_ema = prices_series.ewm(span=fast, adjust=False).mean()
+    slow_ema = prices_series.ewm(span=slow, adjust=False).mean()
+    
+    macd_line = fast_ema - slow_ema
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    
+    # Check current and prior cross states
+    c_macd, c_sig = macd_line.iloc[-1], signal_line.iloc[-1]
+    p_macd, p_sig = macd_line.iloc[-2], signal_line.iloc[-2]
+    
+    if c_macd > c_sig and p_macd <= p_sig:
+        return "Bullish Crossover"
+    elif c_macd < c_sig and p_macd >= p_sig:
+        return "Bearish Crossover"
+    else:
+        return "Bullish Trend" if c_macd > c_sig else "Bearish Trend"
+
+# ==========================================
+# CORE MARKOV REGIME MATHEMATICS PIPELINE
+# ==========================================
+
 def calculate_single_markov(ticker, window=20, threshold=0.012):
     try:
         df = yf.download(ticker, period="1y", progress=False)
@@ -56,6 +116,17 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
             df.columns = df.columns.get_level_values(0)
         df.columns = [str(col).lower() for col in df.columns]
         
+        # Enforce pure float conversions on primary Series to safely handle math computations
+        df['close'] = df['close'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+        
+        # Calculate Technical Indicators
+        latest_rsi = calculate_rsi(df['close'])
+        latest_atr = calculate_atr(df)
+        macd_desc = calculate_macd_signal_str(df['close'])
+        
+        # Existing Markov Array Calculations
         df['Log_Ret'] = np.log(df['close'] / df['close'].shift(1))
         df['Roll_Mom'] = df['Log_Ret'].rolling(window).sum()
         
@@ -103,13 +174,21 @@ def calculate_single_markov(ticker, window=20, threshold=0.012):
             "current_price": float(current_price),
             "year_high": float(year_high),
             "year_low": float(year_low),
-            "regime_score": regime_score
+            "regime_score": regime_score,
+            
+            # Formatted Indicator Sub-payload
+            "rsi": round(float(latest_rsi), 2) if not pd.isna(latest_rsi) else "N/A",
+            "atr": round(float(latest_atr), 2) if not pd.isna(latest_atr) else "N/A",
+            "macd_signal": macd_desc
         }
     except Exception as e:
         print(f"Error computing math matrix for {ticker}: {str(e)}")
         return None
 
-# Secured Endpoints
+# ==========================================
+# SECURED ENDPOINTS
+# ==========================================
+
 @app.get("/api/screener", dependencies=[Depends(verify_token)])
 def get_top_screener():
     current_time = time.time()

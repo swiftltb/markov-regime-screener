@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import pandas as pd
@@ -8,15 +8,16 @@ import os
 import math
 from concurrent.futures import ThreadPoolExecutor
 
-app = FastAPI(title="Secured Markov Screener Engine with Fixed Risk Profiles")
+app = FastAPI(title="Secured Markov Screener Engine with URL Token Validation")
 
 # ==========================================
-# SECURITY: API KEY VALIDATION
+# SECURITY: API KEY VALIDATION (URL PARAMETER PATTERN)
 # ==========================================
+# Safely reads your secret key from your hosting platform environment variables (Render)
 SECRET_KEY = os.environ.get("API_SECRET_KEY")
 
-async def verify_token(authorization: str = Header(...)):
-    if not SECRET_KEY or authorization != SECRET_KEY:
+async def verify_token(token: str = Query(None)):
+    if not SECRET_KEY or token != SECRET_KEY:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid or missing API Key")
 
 # ==========================================
@@ -35,7 +36,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global caches
+# Global memory caches
 INDIVIDUAL_CACHE = {}
 SCREENER_CACHE = {"data": None, "timestamp": 0}
 CACHE_EXPIRY_SECONDS = 3600  
@@ -109,7 +110,7 @@ def calculate_macd_signal_str(series, fast=12, slow=26, signal=9):
         return "Bullish Trend" if c_macd > c_sig else "Bearish Trend"
 
 # ==========================================
-# TRADING SIGNAL SYSTEM LOGIC (FIXED PARAMETERS)
+# TRADING SIGNAL SYSTEM LOGIC
 # ==========================================
 
 def generate_trading_signal(regime, rsi, macd_str, current_price, atr, risk_profile="moderate"):
@@ -128,16 +129,16 @@ def generate_trading_signal(regime, rsi, macd_str, current_price, atr, risk_prof
     except:
         return {"action": "HOLD", "color": "#cbd5e1", "entry": "N/A", "stop": "N/A", "target": "N/A"}
 
-    # Fetch configuration constants explicitly matching the selected profile string
     cfg = RISK_MULTIPLIERS[profile]
     action = "HOLD"
     color = "#cbd5e1" 
     
-    # Core mathematical calculations reacting dynamically to config constraints
+    # Calculate logical fallback levels first so they are ALWAYS available and displayed
     stop_loss = round(current_price - (cfg["stop"] * atr), 2)
     target_price = round(current_price + (cfg["target"] * atr), 2)
     suggested_entry = round(current_price * cfg["buffer"], 2)
 
+    # Determine state conditions matching target action profiles
     if regime == "Bull" and rsi < 48 and "Bullish" in macd_str:
         action = "STRONG BUY"
         color = "#22c55e"
@@ -220,7 +221,7 @@ def calculate_single_markov(ticker, window=20, threshold=0.012, risk_profile="mo
         current_state = df['State'].values[-1] if hasattr(df['State'], 'values') else df['State'].iloc[-1]
         trailing_return = float((df['close'].values[-1] / df['close'].values[0]) - 1)
         
-        # Explicit parameter routing to ensure chosen variant values filter down
+        # Explicit parameter routing to ensure chosen variant values pass downwards
         signal_data = generate_trading_signal(current_state, latest_rsi, macd_desc, current_price, latest_atr, risk_profile)
         
         return {
@@ -240,16 +241,18 @@ def calculate_single_markov(ticker, window=20, threshold=0.012, risk_profile="mo
             "trade_signal": signal_data
         }
     except Exception as e:
-        with open("indicator_error_log.txt", "a") as f:
-            f.write(f"Error parsing calculations for {ticker}: {str(e)}\n")
         return None
 
 # ==========================================
-# SECURED ENDPOINTS
+# ENDPOINTS
 # ==========================================
 
-@app.get("/api/screener", dependencies=[Depends(verify_token)])
-def get_top_screener():
+@app.get("/api/screener")
+def get_top_screener(token: str = Query(None)):
+    # Trigger the parameter verification layer manually inside the root function wrapper
+    if not SECRET_KEY or token != SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid or missing API Key")
+
     current_time = time.time()
     if SCREENER_CACHE["data"] and (current_time - SCREENER_CACHE["timestamp"] < CACHE_EXPIRY_SECONDS):
         return SCREENER_CACHE["data"]
@@ -267,9 +270,11 @@ def get_top_screener():
     SCREENER_CACHE["timestamp"] = current_time
     return top_25
 
-@app.get("/api/regime", dependencies=[Depends(verify_token)])
-def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.012, risk: str = "moderate"):
-    # Normalize risk value handling to ensure consistency inside the backend cache keys mapping
+@app.get("/api/regime")
+def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.012, risk: str = "moderate", token: str = Query(None)):
+    if not SECRET_KEY or token != SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid or missing API Key")
+
     risk_param = str(risk).lower().strip()
     ticker_key = f"{str(ticker).upper().strip()}_{risk_param}"
     current_time = time.time()
@@ -279,7 +284,6 @@ def get_individual_regime(ticker: str, window: int = 20, threshold: float = 0.01
         if current_time - ts < CACHE_EXPIRY_SECONDS: 
             return payload
             
-    # CRITICAL: Replaced hardcoded definition with incoming request parameter explicitly
     res = calculate_single_markov(str(ticker).upper().strip(), window, threshold, risk_profile=risk_param)
     if not res: 
         raise HTTPException(status_code=404, detail="Ticker data calculation failed.")

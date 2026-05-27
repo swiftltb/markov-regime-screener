@@ -1,62 +1,64 @@
 import asyncio
 import time
 import requests
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
 
 # ==========================================
-# GLOBAL STATE & CACHE CONFIGURATION
+# CONFIGURATION & UNIVERSAL STATE
 # ==========================================
-global_cache = {
-    "data": [],
-    "last_updated": 0
-}
-
+global_cache = {"data": [], "last_updated": 0}
 CACHE_INTERVAL_SECONDS = 7200  
 CORE_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AMZN", "META",
     "LLY", "JPM", "V", "UNH", "WMT",
     "RY.TO", "TD.TO", "SHOP.TO", "CP.TO", "CNR.TO"
 ]
-# Replace this with your actual live Vercel base URL
 BASE_DATA_URL = "https://your-vercel-app-url.vercel.app/api/data"
 
 # ==========================================
-# CORE QUANTITATIVE MATHEMATICAL ENGINES
+# MARKOV ENGINE (The Math Implementation)
 # ==========================================
+def run_markov_math(data_list):
+    """Processes raw price series into Markov Regime probabilities."""
+    df = pd.Series(data_list)
+    returns = np.log(df / df.shift(1)).dropna()
+    
+    # Markov Switching Model: 2 Regimes
+    model = sm.tsa.MarkovAutoregression(returns, k_regimes=2, order=1, switching_variance=True)
+    res = model.fit(disp=False)
+    
+    # Return the smoothed probability of Regime 1 (High Volatility/Downside)
+    return float(res.smoothed_marginal_probabilities[1].iloc[-1])
+
 def heavy_matrix_calculations():
     print(f"[{time.strftime('%X')}] Background Daemon: Initiating 15-stock Markov regressions...")
     results = []
     
     for ticker in CORE_UNIVERSE:
         try:
-            # Fetch data from your Vercel-hosted provider
             response = requests.get(f"{BASE_DATA_URL}/{ticker}", timeout=15)
-            
             if response.status_code == 200:
-                data = response.json()
+                raw_data = response.json()
+                prob = run_markov_math(raw_data)
                 
-                # --- INSERT YOUR MARKOV LOGIC HERE ---
-                # Example:
-                # processed_metric = perform_markov_math(data)
-                # results.append({"ticker": ticker, "metrics": processed_metric})
-                
-                # Placeholder so the list populates:
-                results.append({"ticker": ticker, "status": "active_processed"})
-                print(f"Successfully processed: {ticker}")
-            else:
-                print(f"Failed to fetch {ticker}: Status {response.status_code}")
-                
+                results.append({
+                    "ticker": ticker,
+                    "regime_prob": round(prob, 4),
+                    "status": "active"
+                })
         except Exception as e:
             print(f"Error processing {ticker}: {str(e)}")
-            
-    print(f"Loop finished. Total assets processed: {len(results)}")
+    
     return results
 
 # ==========================================
-# PERSISTENT AUTOMATED DAEMON WORKER
+# BACKGROUND WORKER (Daemon)
 # ==========================================
 async def permanent_cache_worker():
     global global_cache
@@ -66,16 +68,12 @@ async def permanent_cache_worker():
             if fresh_data:
                 global_cache["data"] = fresh_data
                 global_cache["last_updated"] = time.time()
-                print(f"[{time.strftime('%X')}] Cache refreshed successfully.")
-            else:
-                print(f"[{time.strftime('%X')}] Warning: Background run returned empty. Preserving state.")
         except Exception as e:
-            print(f"[{time.strftime('%X')}] Critical Error during daemon refresh: {str(e)}")
-        
+            print(f"Daemon Error: {str(e)}")
         await asyncio.sleep(CACHE_INTERVAL_SECONDS)
 
 # ==========================================
-# FASTAPI LIFECYCLE MANAGEMENT
+# FASTAPI LIFECYCLE & ENDPOINTS
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -83,37 +81,20 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ==========================================
-# ENDPOINTS
-# ==========================================
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health_check():
     return {
         "status": "online", 
-        "timestamp": time.time(),
-        "cache_age_seconds": time.time() - global_cache["last_updated"] if global_cache["last_updated"] > 0 else 0
+        "engine": "active" if global_cache["last_updated"] > 0 else "initializing",
+        "cache_age": time.time() - global_cache["last_updated"]
     }
 
 @app.get("/api/screener")
 async def get_screener_data(token: str):
     if token != "ecf3ac57988156c7d0dd278042861445":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-        
-    if not global_cache["data"]:
-        print("System Warning: Cache empty. Triggering forced calculation.")
-        global_cache["data"] = heavy_matrix_calculations()
-        global_cache["last_updated"] = time.time()
-
+        raise HTTPException(status_code=401)
     return global_cache["data"]
 
 if __name__ == "__main__":

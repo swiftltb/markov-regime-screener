@@ -1,108 +1,87 @@
-import asyncio
-import time
-import requests
-import pandas as pd
-import numpy as np
-import statsmodels.api as sm
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
 import yfinance as yf
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
+import pandas as pd
 import uvicorn
+import os
+import requests
+import asyncio
 
-# ==========================================
-# CONFIGURATION & UNIVERSAL STATE
-# ==========================================
-global_cache = {"data": [], "last_updated": 0}
-CACHE_INTERVAL_SECONDS = 7200  
-CORE_UNIVERSE = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "META",
-    "LLY", "JPM", "V", "UNH", "WMT",
-    "RY.TO", "TD.TO", "SHOP.TO", "CP.TO", "CNR.TO"
-]
-# This points to the Vercel-deployed instance
+app = FastAPI()
+
+# --- CONFIGURATION ---
 BASE_DATA_URL = "https://markov-screener-proxy.vercel.app/api/main"
 
-# ==========================================
-# MARKOV ENGINE
-# ==========================================
-def run_markov_math(data_list):
-    df = pd.Series(data_list)
-    # Ensure data is numeric
-    returns = np.log(df / df.shift(1)).dropna()
-    model = sm.tsa.MarkovAutoregression(returns, k_regimes=2, order=1, switching_variance=True)
-    res = model.fit(disp=False)
-    return float(res.smoothed_marginal_probabilities[1].iloc[-1])
+# --- SAFETY LOGIC & ENGINE ---
+async def fetch_ticker_data(ticker: str):
+    try:
+        # Loop for data retrieval
+        df = await asyncio.to_thread(yf.download, ticker, period="1y", interval="1d")
+        return {"status": "success", "data": df.tail().to_dict()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-def heavy_matrix_calculations():
-    print(f"[{time.strftime('%X')}] Background Daemon: Initiating 15-stock Markov regressions...")
-    results = []
-    
-    for ticker in CORE_UNIVERSE:
-        url = f"{BASE_DATA_URL}/{ticker}"
-        try:
-            response = requests.get(url, timeout=15)
-            if response.status_code == 200:
-                raw_data = response.json()
-                prob = run_markov_math(raw_data)
-                results.append({"ticker": ticker, "regime_prob": round(prob, 4), "status": "active"})
-                print(f"Successfully processed: {ticker}")
-            else:
-                print(f"Failed to fetch {ticker}: Status {response.status_code}")
-        except Exception as e:
-            print(f"CRITICAL ERROR processing {ticker}: {str(e)}")
-    
-    return results
+# --- DEBUGGING ROUTE ---
+@app.get("/debug-path/{path:path}")
+async def debug_path(path: str):
+    return {"received_path": path}
 
-# ==========================================
-# BACKGROUND WORKER
-# ==========================================
-async def permanent_cache_worker():
-    global global_cache
-    while True:
-        try:
-            fresh_data = heavy_matrix_calculations()
-            if fresh_data:
-                global_cache["data"] = fresh_data
-                global_cache["last_updated"] = time.time()
-                print(f"[{time.strftime('%X')}] Cache updated.")
-        except Exception as e:
-            print(f"Daemon Error: {str(e)}")
-        await asyncio.sleep(CACHE_INTERVAL_SECONDS)
-
-# ==========================================
-# FASTAPI LIFECYCLE & ROUTES
-# ==========================================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Create the background task
-    task = asyncio.create_task(permanent_cache_worker())
-    yield
-    task.cancel()
-
-app = FastAPI(lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
+# --- PRIMARY ROUTES ---
 @app.get("/data/{ticker}")
 async def get_ticker_data(ticker: str):
+    return await fetch_ticker_data(ticker)
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root():
+    return """
+    <html>
+        <head>
+            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+            <style>
+                body { font-family: sans-serif; padding: 20px; }
+                .callout { padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+                .warning { background-color: #fff3cd; border: 1px solid #ffeeba; }
+                .status { background-color: #d4edda; border: 1px solid #c3e6cb; }
+            </style>
+        </head>
+        <body>
+            <div class="callout status">Engine Status: Operational</div>
+            <div class="callout warning">Disclaimer: Past performance is not indicative of future results.</div>
+            
+            <input type="text" id="tickerInput" placeholder="Enter Ticker (e.g. AAPL)">
+            <button onclick="fetchData()">Analyze</button>
+            
+            <table id="screenerTable" border="1">
+                <thead><tr><th>Ticker</th><th>Latest Close</th></tr></thead>
+                <tbody></tbody>
+            </table>
+            <canvas id="myChart" width="400" height="200"></canvas>
+            
+            <script>
+                async function fetchData() {
+                    const ticker = document.getElementById('tickerInput').value;
+                    const res = await fetch('/data/' + ticker);
+                    const data = await res.json();
+                    alert("Analysis Modal: Data received for " + ticker);
+                }
+            </script>
+        </body>
+    </html>
+    """
+
+# --- BACKGROUND WORKER (TEST) ---
+async def run_debug_test():
+    # Giving the server a moment to start before hitting itself
+    await asyncio.sleep(5)
     try:
-        # yfinance download
-        df = yf.download(ticker, period="1y", interval="1d")
-        if df.empty:
-            raise HTTPException(status_code=404, detail="Ticker not found")
-        return df['Close'].tolist()
+        response = requests.get(f"{BASE_DATA_URL}/debug-path/AAPL")
+        print(f"DEBUG RESPONSE: {response.json()}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"DEBUG ERROR: {e}")
 
-@app.api_route("/api/health", methods=["GET", "HEAD"])
-async def health_check():
-    return {"status": "online", "cache_age": time.time() - global_cache["last_updated"]}
-
-@app.get("/api/screener")
-async def get_screener_data(token: str):
-    if token != "ecf3ac57988156c7d0dd278042861445":
-        raise HTTPException(status_code=401)
-    return global_cache["data"]
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(run_debug_test())
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

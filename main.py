@@ -28,11 +28,11 @@ def standardize_ticker_data(df, ticker):
     if df is None or df.empty:
         return None
 
-    # Flatten MultiIndex columns if present
+    # MultiIndex Safety Guard: Grab Level 0 if yfinance packages it with multi-levels
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(-1)
+        df.columns = df.columns.get_level_values(0)
     
-    # Normalize column text
+    # Normalize column text to lowercase strings
     df.columns = [str(c).lower().strip() for c in df.columns]
     
     # Loose mapping configuration
@@ -47,7 +47,7 @@ def standardize_ticker_data(df, ticker):
     
     # Absolute minimum requirement survival check
     if 'close' not in df.columns:
-        logger.warning(f"Ticker {ticker} rejected: missing 'close' price column.")
+        logger.warning(f"Ticker {ticker} rejected: missing 'close' price column. Found columns: {list(df.columns)}")
         return None
         
     # Fallback assignment to prevent structural crashes
@@ -71,10 +71,8 @@ def calculate_rsi(prices, period=14):
     return rsi.iloc[-1]
 
 def generate_trading_signal(regime, rsi, price, p_bull, risk_profile):
-    # Standardised structural response schema
     signal = {"action": "HOLD", "entry": f"${price:.2f}", "stop": "N/A", "target": "N/A"}
     
-    # Adaptive Risk Multipliers
     multipliers = {
         "conservative": {"stop": 0.03, "target": 0.06},
         "moderate": {"stop": 0.05, "target": 0.10},
@@ -82,11 +80,11 @@ def generate_trading_signal(regime, rsi, price, p_bull, risk_profile):
     }
     m = multipliers.get(risk_profile, multipliers["moderate"])
 
-    # ALWAYS POPULATE THRESHOLDS: Calculate floor/ceiling zones regardless of context
+    # ALWAYS POPULATE THRESHOLDS regardless of regime context
     signal["stop"] = f"${(price * (1 - m['stop'])):.2f}"
     signal["target"] = f"${(price * (1 + m['target'])):.2f}"
 
-    # Determine explicit Action recommendation tags for the frontend alert system
+    # Determine explicit Action recommendation tags
     if regime == "Bull" and rsi < 70 and p_bull > 0.60:
         signal["action"] = "BUY"
     elif rsi > 75:
@@ -98,18 +96,17 @@ def generate_trading_signal(regime, rsi, price, p_bull, risk_profile):
 
 # 4. Core Markov Logic Circuit
 def calculate_single_markov(ticker, window=20, threshold=0.012, risk="moderate"):
-    # Clear out breaking strings and exchange suffixes
     clean_ticker = ticker.strip().upper()
     clean_ticker = clean_ticker.replace(".US", "").replace("NYSE:", "").replace("NASDAQ:", "").replace("$", "")
     
     try:
-        raw_df = yf.download(clean_ticker, period="1y", interval="1d", progress=False)
-        df = standardize_ticker_data(raw_df, clean_ticker)
+        # FIXED: Explicitly tell yfinance to return flat tables instead of multi-level indices
+        raw_df = yf.download(clean_ticker, period="1y", interval="1d", progress=False, multi_level_index=False)
         
+        df = standardize_ticker_data(raw_df, clean_ticker)
         if df is None or len(df) < window:
             return None
             
-        # Isolate closing series and compute returns
         close_series = df['close'].astype(float)
         returns = close_series.pct_change().dropna()
         
@@ -120,25 +117,20 @@ def calculate_single_markov(ticker, window=20, threshold=0.012, risk="moderate")
         model = MarkovRegression(returns, k_regimes=2, switching_variance=True)
         res = model.fit(disp=False)
         
-        # Determine current regime state based on smoothed probabilities
         smoothed_probs = res.smoothed_marginal_probabilities
         current_regime_index = np.argmax([smoothed_probs[0].iloc[-1], smoothed_probs[1].iloc[-1]])
         
-        # Labeling mapping logic
         regime_labels = {0: "Bear", 1: "Bull"}
         current_regime = regime_labels.get(current_regime_index, "Unknown")
         
-        # Calculate transition probability safety margin
         p_bull_bull = float(res.regime_transition_matrix[1, 1]) if hasattr(res, 'regime_transition_matrix') else 0.50
         
-        # Tail metrics
         latest_price = float(close_series.iloc[-1])
         trailing_return = float((close_series.iloc[-1] / close_series.iloc[-window] - 1) * 100)
         latest_rsi = calculate_rsi(close_series)
         
         trade_signal = generate_trading_signal(current_regime, latest_rsi, latest_price, p_bull_bull, risk)
         
-        # Prepare historical data slice for downstream visualization
         history_df = df[['close']].tail(60).reset_index()
         history_df.columns = ['date', 'close']
         history_df['date'] = history_df['date'].dt.strftime('%Y-%m-%d')

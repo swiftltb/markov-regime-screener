@@ -36,11 +36,10 @@ def heavy_matrix_calculations():
     
     try:
         # --- YOUR EXISTING LOGIC LOOP RUNS HERE ---
-        # for ticker in CORE_UNIVERSE:
-        #     1. Pull data via Vercel proxy
-        #     2. Run statsmodels MarkovAutoregression
-        #     3. Calculate probabilities & format metrics
-        #     4. results.append(formatted_asset_dict)
+        # 1. Pull data via Vercel proxy
+        # 2. Run statsmodels MarkovAutoregression
+        # 3. Calculate probabilities & format metrics
+        # 4. results.append(formatted_asset_dict)
         pass
     except Exception as e:
         print(f"[{time.strftime('%X')}] Mathematical matrix processing failure: {str(e)}")
@@ -78,7 +77,6 @@ async def permanent_cache_worker():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles automatic background worker registration at server boot"""
-    # Spawns the daemon loop asynchronously the microsecond Render spins up
     asyncio.create_task(permanent_cache_worker())
     yield
 
@@ -98,11 +96,11 @@ app.add_middleware(
 # ENDPOINTS / ROUTING MATRIX
 # ==========================================
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health_check():
     """
     LIGHTWEIGHT KEEP-AWAKE ENDPOINT
-    Bypasses token security and math layers for fast, clean uptime tracker pings.
+    Accepts GET/HEAD requests to satisfy UptimeRobot pings without error.
     """
     return {
         "status": "online", 
@@ -114,15 +112,15 @@ async def health_check():
 async def get_screener_data(token: str):
     """
     MAIN DASHBOARD DATA INGESTION PIPELINE
-    Serves metrics directly out of RAM instantly (0-2ms response latency).
+    Serves metrics directly out of RAM instantly.
     """
     global global_cache
     
-    # 1. High-Priority Token Security Check
+    # 1. Token Security Check
     if token != "ecf3ac57988156c7d0dd278042861445":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token credential")
         
-    # 2. Startup Guard: If a user hits the site before the first background thread loop complete
+    # 2. Startup Guard
     if not global_cache["data"]:
         print("System Warning: Cache hit during startup execution phase. Running instant calculation block.")
         global_cache["data"] = heavy_matrix_calculations()

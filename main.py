@@ -23,19 +23,25 @@ app.add_middleware(
 
 SECRET_KEY = os.getenv("API_SECRET_KEY", "your_fallback_dev_key")
 
-# 2. Standardize Ticker Data
+# 2. Forgiving Gatekeeper Configuration
 def standardize_ticker_data(df, ticker):
-    if df is None or df.empty: return None
+    if df is None or df.empty:
+        return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df.columns = [str(c).lower().strip() for c in df.columns]
     mapping = {'adj close': 'close', 'close': 'close', 'high': 'high', 'low': 'low', 'open': 'open'}
     df = df.rename(columns=mapping)
-    if 'close' not in df.columns: return None
+    if 'close' not in df.columns:
+        logger.warning(f"Ticker {ticker} rejected: missing 'close'.")
+        return None
+    if 'high' not in df.columns: df['high'] = df['close']
+    if 'low' not in df.columns: df['low'] = df['close']
+    if 'open' not in df.columns: df['open'] = df['close']
     df = df.ffill().bfill()
     return df[['close', 'high', 'low', 'open']]
 
-# 3. Indicators
+# 3. Indicator & Strategy Matrix
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1: return 50.0
     delta = prices.diff()
@@ -54,7 +60,7 @@ def generate_trading_signal(regime, rsi, price, p_bull, risk_profile="moderate")
     elif regime == "Bear": signal["action"] = "BEAR_HOLD"
     return signal
 
-# 4. Core Markov Logic (FIXED FOR FREQUENCY)
+# 4. Core Markov Logic
 def calculate_single_markov(ticker, window=20, risk="moderate"):
     clean_ticker = ticker.strip().upper().replace(".US", "").replace("$", "")
     try:
@@ -62,10 +68,9 @@ def calculate_single_markov(ticker, window=20, risk="moderate"):
         df = standardize_ticker_data(raw_df, clean_ticker)
         if df is None or len(df) < window: return None
         
-        # --- FIX: Ensure Frequency for statsmodels ---
+        # FREQUENCY FIX
         df.index = pd.to_datetime(df.index)
-        df = df.asfreq('B')  # Business day frequency
-        df = df.ffill()      # Fill gaps
+        df = df.asfreq('B').ffill()
         
         close_series = df['close']
         returns = close_series.pct_change().dropna()
@@ -73,9 +78,10 @@ def calculate_single_markov(ticker, window=20, risk="moderate"):
         model = MarkovRegression(returns, k_regimes=2, switching_variance=True)
         res = model.fit(disp=False)
         
+        # SAFE ATTRIBUTE ACCESS
+        p_bull_bull = float(res.regime_transition[1, 1]) if hasattr(res, 'regime_transition') else 0.50
         smoothed_probs = res.smoothed_marginal_probabilities
         current_regime = "Bull" if smoothed_probs[1].iloc[-1] > smoothed_probs[0].iloc[-1] else "Bear"
-        p_bull_bull = float(res.regime_transition_matrix[1, 1])
         
         latest_price = float(close_series.iloc[-1])
         latest_rsi = calculate_rsi(close_series)

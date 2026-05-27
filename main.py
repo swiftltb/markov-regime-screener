@@ -12,28 +12,40 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def get_markov_data(ticker):
+    # Aggressive cleaning of the ticker string
+    clean_ticker = str(ticker).strip().upper()
     try:
-        raw_df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        raw_df = yf.download(clean_ticker, period="1y", interval="1d", progress=False)
+        if raw_df is None or raw_df.empty:
+            logger.error(f"No data returned for: {clean_ticker}")
+            return None
+            
         df = raw_df.copy()
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = [c.lower() for c in df.columns]
-        if 'close' not in df.columns: return None
+        
+        if 'close' not in df.columns: 
+            logger.error(f"Close column missing for: {clean_ticker}")
+            return None
+            
         df = df.rename(columns={'close': 'Close'})
         df = df.asfreq('B').ffill()
+        
         returns = df['Close'].pct_change().dropna()
         model = MarkovRegression(returns, k_regimes=2, switching_variance=True).fit(disp=False)
         p1 = model.smoothed_marginal_probabilities[1].iloc[-1]
         current_regime = "Bull" if p1 > 0.5 else "Bear"
+        
         return {
-            "ticker": ticker, "current_price": float(df['Close'].iloc[-1]),
+            "ticker": clean_ticker, "current_price": float(df['Close'].iloc[-1]),
             "current_regime": current_regime, "rsi": 50,
             "trade_signal": {"action": "BUY" if current_regime == "Bull" else "HOLD", "target": "N/A"},
             "history_dates": df.tail(60).index.strftime('%Y-%m-%d').tolist(),
             "history_data": df['Close'].tail(60).tolist()
         }
     except Exception as e:
-        logger.error(f"CRITICAL ERROR for {ticker}: {str(e)}")
+        logger.error(f"CRITICAL ERROR for {clean_ticker}: {str(e)}")
         return None
 
 @app.get("/api/screener")

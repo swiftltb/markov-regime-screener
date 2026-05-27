@@ -1,118 +1,49 @@
-import logging
-import os
-import numpy as np
+import logging, os
 import pandas as pd
 import yfinance as yf
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
 
-# 1. Setup Logging & App
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Markov Regime Screener API")
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-SECRET_KEY = os.getenv("API_SECRET_KEY", "your_fallback_dev_key")
-
-# 2. Forgiving Gatekeeper Configuration
-def standardize_ticker_data(df, ticker):
-    if df is None or df.empty:
-        return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df.columns = [str(c).lower().strip() for c in df.columns]
-    mapping = {'adj close': 'close', 'close': 'close', 'high': 'high', 'low': 'low', 'open': 'open'}
-    df = df.rename(columns=mapping)
-    if 'close' not in df.columns:
-        logger.warning(f"Ticker {ticker} rejected: missing 'close'.")
-        return None
-    if 'high' not in df.columns: df['high'] = df['close']
-    if 'low' not in df.columns: df['low'] = df['close']
-    if 'open' not in df.columns: df['open'] = df['close']
-    df = df.ffill().bfill()
-    return df[['close', 'high', 'low', 'open']]
-
-# 3. Indicator & Strategy Matrix
-def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1: return 50.0
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / (loss + 1e-9)
-    return (100 - (100 / (1 + rs))).iloc[-1]
-
-def generate_trading_signal(regime, rsi, price, p_bull, risk_profile="moderate"):
-    signal = {"action": "HOLD", "entry": f"${price:.2f}", "stop": "N/A", "target": "N/A"}
-    m = {"conservative": {"stop": 0.03, "target": 0.06}, "moderate": {"stop": 0.05, "target": 0.10}, "aggressive": {"stop": 0.08, "target": 0.18}}.get(risk_profile)
-    signal["stop"] = f"${(price * (1 - m['stop'])):.2f}"
-    signal["target"] = f"${(price * (1 + m['target'])):.2f}"
-    if regime == "Bull" and rsi < 70 and p_bull > 0.60: signal["action"] = "BUY"
-    elif rsi > 75: signal["action"] = "EXHAUSTED"
-    elif regime == "Bear": signal["action"] = "BEAR_HOLD"
-    return signal
-
-# 4. Core Markov Logic
-def calculate_single_markov(ticker, window=20, risk="moderate"):
-    clean_ticker = ticker.strip().upper().replace(".US", "").replace("$", "")
+def get_markov_data(ticker):
     try:
-        raw_df = yf.download(clean_ticker, period="1y", interval="1d", progress=False, multi_level_index=False)
-        df = standardize_ticker_data(raw_df, clean_ticker)
-        if df is None or len(df) < window: return None
-        
-        # FREQUENCY FIX
-        df.index = pd.to_datetime(df.index)
+        raw_df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        df = raw_df.copy()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        if 'close' not in df.columns: return None
+        df = df.rename(columns={'close': 'Close'})
         df = df.asfreq('B').ffill()
-        
-        close_series = df['close']
-        returns = close_series.pct_change().dropna()
-        
-        model = MarkovRegression(returns, k_regimes=2, switching_variance=True)
-        res = model.fit(disp=False)
-        
-        # SAFE ATTRIBUTE ACCESS
-        p_bull_bull = float(res.regime_transition[1, 1]) if hasattr(res, 'regime_transition') else 0.50
-        smoothed_probs = res.smoothed_marginal_probabilities
-        current_regime = "Bull" if smoothed_probs[1].iloc[-1] > smoothed_probs[0].iloc[-1] else "Bear"
-        
-        latest_price = float(close_series.iloc[-1])
-        latest_rsi = calculate_rsi(close_series)
-        trade_signal = generate_trading_signal(current_regime, latest_rsi, latest_price, p_bull_bull, risk)
-        
-        history_df = df[['close']].tail(60).reset_index()
-        history_df.columns = ['date', 'close']
-        
+        returns = df['Close'].pct_change().dropna()
+        model = MarkovRegression(returns, k_regimes=2, switching_variance=True).fit(disp=False)
+        p1 = model.smoothed_marginal_probabilities[1].iloc[-1]
+        current_regime = "Bull" if p1 > 0.5 else "Bear"
         return {
-            "ticker": clean_ticker,
-            "current_price": latest_price,
-            "current_regime": current_regime,
-            "p_bull_bull": p_bull_bull,
-            "rsi": round(latest_rsi, 1),
-            "trade_signal": trade_signal,
-            "history_dates": history_df['date'].dt.strftime('%Y-%m-%d').tolist(),
-            "history_data": history_df['close'].tolist()
+            "ticker": ticker, "current_price": float(df['Close'].iloc[-1]),
+            "current_regime": current_regime, "rsi": 50,
+            "trade_signal": {"action": "BUY" if current_regime == "Bull" else "HOLD", "target": "N/A"},
+            "history_dates": df.tail(60).index.strftime('%Y-%m-%d').tolist(),
+            "history_data": df['Close'].tail(60).tolist()
         }
     except Exception as e:
-        logger.error(f"Error {clean_ticker}: {e}")
+        logger.error(f"CRITICAL ERROR for {ticker}: {str(e)}")
         return None
 
-# 5. API Endpoints
 @app.get("/api/screener")
-def get_screener_matrix(token: str = Query(None)):
-    if token != SECRET_KEY: raise HTTPException(status_code=403, detail="Unauthorized")
-    return [d for d in [calculate_single_markov(t) for t in ["SPY", "QQQ", "IWM", "TLT", "GLD", "BTC-USD"]] if d]
+def screener(token: str = Query(None)):
+    if token != os.getenv("API_SECRET_KEY"): raise HTTPException(403)
+    return [d for d in [get_markov_data(t) for t in ["SPY", "QQQ", "IWM", "TLT", "GLD"]] if d]
 
 @app.get("/api/regime")
-def get_individual_regime(ticker: str, token: str = Query(None)):
-    if token != SECRET_KEY: raise HTTPException(status_code=403, detail="Unauthorized")
-    data = calculate_single_markov(ticker)
-    if not data: raise HTTPException(status_code=404, detail="Processing failed")
+def regime(ticker: str, risk: str = "moderate", token: str = Query(None)):
+    if token != os.getenv("API_SECRET_KEY"): raise HTTPException(403)
+    data = get_markov_data(ticker)
+    if not data: raise HTTPException(404, detail="Ticker not found")
     return data

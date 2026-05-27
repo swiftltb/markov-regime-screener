@@ -59,7 +59,7 @@ def standardize_ticker_data(df, ticker):
     df = df.ffill().bfill()
     return df[['close', 'high', 'low', 'open']]
 
-# 3. Indicator Calculations (Cleaned Data Implementations)
+# 3. Indicator & Strategy Matrix Calculations
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
         return 50.0
@@ -72,7 +72,7 @@ def calculate_rsi(prices, period=14):
 
 def generate_trading_signal(regime, rsi, price, p_bull, risk_profile):
     # Standardised structural response schema
-    signal = {"action": "HOLD", "entry": "N/A", "stop": "N/A", "target": "N/A"}
+    signal = {"action": "HOLD", "entry": f"${price:.2f}", "stop": "N/A", "target": "N/A"}
     
     # Adaptive Risk Multipliers
     multipliers = {
@@ -82,13 +82,17 @@ def generate_trading_signal(regime, rsi, price, p_bull, risk_profile):
     }
     m = multipliers.get(risk_profile, multipliers["moderate"])
 
+    # ALWAYS POPULATE THRESHOLDS: Calculate floor/ceiling zones regardless of context
+    signal["stop"] = f"${(price * (1 - m['stop'])):.2f}"
+    signal["target"] = f"${(price * (1 + m['target'])):.2f}"
+
+    # Determine explicit Action recommendation tags for the frontend alert system
     if regime == "Bull" and rsi < 70 and p_bull > 0.60:
         signal["action"] = "BUY"
-        signal["entry"] = f"${price:.2f}"
-        signal["stop"] = f"${(price * (1 - m['stop'])):.2f}"
-        signal["target"] = f"${(price * (1 + m['target'])):.2f}"
-    elif regime == "Bear" or rsi > 75:
-        signal["action"] = "SELL"
+    elif rsi > 75:
+        signal["action"] = "EXHAUSTED"
+    elif regime == "Bear":
+        signal["action"] = "BEAR_HOLD"
         
     return signal
 
@@ -135,7 +139,6 @@ def calculate_single_markov(ticker, window=20, threshold=0.012, risk="moderate")
         trade_signal = generate_trading_signal(current_regime, latest_rsi, latest_price, p_bull_bull, risk)
         
         # Prepare historical data slice for downstream visualization
-        # Reformats DataFrame to a standard JSON web array format [[date_string, close_price], ...]
         history_df = df[['close']].tail(60).reset_index()
         history_df.columns = ['date', 'close']
         history_df['date'] = history_df['date'].dt.strftime('%Y-%m-%d')

@@ -1,5 +1,6 @@
 import asyncio
 import time
+import requests
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -13,62 +14,64 @@ global_cache = {
     "last_updated": 0
 }
 
-# 2-Hour Precise Background Clock Allocation (7200 seconds)
 CACHE_INTERVAL_SECONDS = 7200  
-
-# Unified Expanded Target Portfolio (15 Institutional Assets)
 CORE_UNIVERSE = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "META",        # Top 5 NASDAQ
-    "LLY", "JPM", "V", "UNH", "WMT",               # Top 5 NYSE
-    "RY.TO", "TD.TO", "SHOP.TO", "CP.TO", "CNR.TO" # Top 5 TSX
+    "AAPL", "MSFT", "NVDA", "AMZN", "META",
+    "LLY", "JPM", "V", "UNH", "WMT",
+    "RY.TO", "TD.TO", "SHOP.TO", "CP.TO", "CNR.TO"
 ]
+# Replace this with your actual live Vercel base URL
+BASE_DATA_URL = "https://your-vercel-app-url.vercel.app/api/data"
 
 # ==========================================
 # CORE QUANTITATIVE MATHEMATICAL ENGINES
 # ==========================================
 def heavy_matrix_calculations():
-    """
-    Your structural Markov switching engine loop that connects 
-    to your Vercel data fetcher and runs math arrays.
-    """
     print(f"[{time.strftime('%X')}] Background Daemon: Initiating 15-stock Markov regressions...")
     results = []
     
-    try:
-        # --- YOUR EXISTING LOGIC LOOP RUNS HERE ---
-        # 1. Pull data via Vercel proxy
-        # 2. Run statsmodels MarkovAutoregression
-        # 3. Calculate probabilities & format metrics
-        # 4. results.append(formatted_asset_dict)
-        pass
-    except Exception as e:
-        print(f"[{time.strftime('%X')}] Mathematical matrix processing failure: {str(e)}")
-        
+    for ticker in CORE_UNIVERSE:
+        try:
+            # Fetch data from your Vercel-hosted provider
+            response = requests.get(f"{BASE_DATA_URL}/{ticker}", timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # --- INSERT YOUR MARKOV LOGIC HERE ---
+                # Example:
+                # processed_metric = perform_markov_math(data)
+                # results.append({"ticker": ticker, "metrics": processed_metric})
+                
+                # Placeholder so the list populates:
+                results.append({"ticker": ticker, "status": "active_processed"})
+                print(f"Successfully processed: {ticker}")
+            else:
+                print(f"Failed to fetch {ticker}: Status {response.status_code}")
+                
+        except Exception as e:
+            print(f"Error processing {ticker}: {str(e)}")
+            
+    print(f"Loop finished. Total assets processed: {len(results)}")
     return results
 
 # ==========================================
 # PERSISTENT AUTOMATED DAEMON WORKER
 # ==========================================
 async def permanent_cache_worker():
-    """
-    Persistent background loop that wakes up exactly every 2 hours
-    to calculate, update, and hold the market universe in server RAM.
-    """
     global global_cache
     while True:
         try:
             fresh_data = heavy_matrix_calculations()
-            
             if fresh_data:
                 global_cache["data"] = fresh_data
                 global_cache["last_updated"] = time.time()
-                print(f"[{time.strftime('%X')}] Cache refreshed successfully. Next automated update in 2 hours.")
+                print(f"[{time.strftime('%X')}] Cache refreshed successfully.")
             else:
-                print(f"[{time.strftime('%X')}] Warning: Background run returned empty dataset. Preserving existing cache state.")
+                print(f"[{time.strftime('%X')}] Warning: Background run returned empty. Preserving state.")
         except Exception as e:
-            print(f"[{time.strftime('%X')}] Critical Error during daemon cache refresh: {str(e)}")
+            print(f"[{time.strftime('%X')}] Critical Error during daemon refresh: {str(e)}")
         
-        # Put the worker thread to sleep for exactly 2 hours
         await asyncio.sleep(CACHE_INTERVAL_SECONDS)
 
 # ==========================================
@@ -76,14 +79,11 @@ async def permanent_cache_worker():
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Handles automatic background worker registration at server boot"""
     asyncio.create_task(permanent_cache_worker())
     yield
 
-# Initialize Application Instance
 app = FastAPI(lifespan=lifespan)
 
-# Standard Security Configuration for WordPress Layout Cross-Origin Requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -93,15 +93,11 @@ app.add_middleware(
 )
 
 # ==========================================
-# ENDPOINTS / ROUTING MATRIX
+# ENDPOINTS
 # ==========================================
 
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health_check():
-    """
-    LIGHTWEIGHT KEEP-AWAKE ENDPOINT
-    Accepts GET/HEAD requests to satisfy UptimeRobot pings without error.
-    """
     return {
         "status": "online", 
         "timestamp": time.time(),
@@ -110,23 +106,14 @@ async def health_check():
 
 @app.get("/api/screener")
 async def get_screener_data(token: str):
-    """
-    MAIN DASHBOARD DATA INGESTION PIPELINE
-    Serves metrics directly out of RAM instantly.
-    """
-    global global_cache
-    
-    # 1. Token Security Check
     if token != "ecf3ac57988156c7d0dd278042861445":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token credential")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
         
-    # 2. Startup Guard
     if not global_cache["data"]:
-        print("System Warning: Cache hit during startup execution phase. Running instant calculation block.")
+        print("System Warning: Cache empty. Triggering forced calculation.")
         global_cache["data"] = heavy_matrix_calculations()
         global_cache["last_updated"] = time.time()
 
-    # 3. Deliver populated data cache instantly
     return global_cache["data"]
 
 if __name__ == "__main__":

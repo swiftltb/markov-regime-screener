@@ -21,7 +21,7 @@ CORE_UNIVERSE = [
     "RY.TO", "TD.TO", "SHOP.TO", "CP.TO", "CNR.TO"
 ]
 # This points to the Vercel-deployed instance
-BASE_DATA_URL = "https://markov-screener-proxy.vercel.app/api/main/data"
+BASE_DATA_URL = "https://markov-screener-proxy.vercel.app/api/main"
 
 # ==========================================
 # MARKOV ENGINE
@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-@app.get("/api/main/data/{ticker}")
+@app.get("/data/{ticker}")
 async def get_ticker_data(ticker: str):
     try:
         # yfinance download

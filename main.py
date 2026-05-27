@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-@app.get("/api/data/{ticker}")
+@app.get("/api/main/data/{ticker}")
 async def get_ticker_data(ticker: str):
     try:
         # yfinance download

@@ -1,5 +1,13 @@
 {
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/main.py" }
+  "functions": {
+    "main.py": {
+      "runtime": "vercel-python@3.12"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/data/(.*)",
+      "dest": "main.py"
+    }
   ]
 }

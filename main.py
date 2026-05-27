@@ -1,109 +1,187 @@
+import logging
+import os
+import numpy as np
+import pandas as pd
+import yfinance as yf
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import time
-import os
-import logging
-from concurrent.futures import ThreadPoolExecutor
+from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
 
-# Configure logging
+# 1. Setup Logging & App
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Secured Markov Screener Engine")
+app = FastAPI(title="Markov Regime Screener API")
 
-# --- CORS & SECURITY ---
-SECRET_KEY = os.environ.get("API_SECRET_KEY")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://www.stockscreen.art", "https://stockscreen.art"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- CONFIG ---
-SCREENER_TICKERS = ["SPY", "QQQ", "DIA", "AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "XOM", "JPM", "V", "MA", "LLY", "UNH", "COST", "TPL", "FIX", "XIU.TO", "CSU.TO", "TOI.TO", "LMN.TO", "SHOP.TO", "ATD.TO", "BN.TO", "CNQ.TO", "CP.TO", "CNR.TO", "TD.TO", "RY.TO", "BMO.TO", "CCO.TO", "BCE.TO", "ENB.TO"]
-RISK_MULTIPLIERS = {"conservative": {"stop": 1.5, "target": 2.5, "buffer": 0.995}, "moderate": {"stop": 2.0, "target": 3.5, "buffer": 1.000}, "aggressive": {"stop": 3.0, "target": 5.0, "buffer": 1.005}}
+SECRET_KEY = os.getenv("API_SECRET_KEY", "your_fallback_dev_key")
 
-# --- 1. THE GATEKEEPER ---
+# 2. Forgiving Gatekeeper Configuration
 def standardize_ticker_data(df, ticker):
-    if df is None or df.empty: return None
-    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(-1)
-    df.columns = [str(c).lower().strip() for c in df.columns]
-    mapping = {'adj close': 'close', 'close': 'close', 'high': 'high', 'low': 'low'}
-    df = df.rename(columns=mapping)
-    if not all(col in df.columns for col in ['close', 'high', 'low']): return None
-    df = df[['close', 'high', 'low']].apply(pd.to_numeric, errors='coerce').dropna()
-    return df
-
-# --- 2. TECHNICAL INDICATOR CALCULATIONS ---
-def calculate_rsi(series, period=14):
-    if series.empty or len(series) < period: return np.nan
-    delta = series.diff()
-    gain, loss = delta.clip(lower=0), -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/period).mean()
-    avg_loss = loss.ewm(alpha=1/period).mean()
-    rs = avg_gain / avg_loss
-    return (100 - (100 / (1 + rs))).iloc[-1]
-
-def calculate_atr(df, period=14):
-    tr = pd.concat([df['high'] - df['low'], (df['high'] - df['close'].shift(1)).abs(), (df['low'] - df['close'].shift(1)).abs()], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/period).mean().iloc[-1]
-
-def calculate_macd_signal_str(series, fast=12, slow=26, signal=9):
-    macd = series.ewm(span=fast, adjust=False).mean() - series.ewm(span=slow, adjust=False).mean()
-    sig = macd.ewm(span=signal, adjust=False).mean()
-    if macd.iloc[-1] > sig.iloc[-1] and macd.iloc[-2] <= sig.iloc[-2]: return "Bullish Crossover"
-    return "Bullish Trend" if macd.iloc[-1] > sig.iloc[-1] else "Bearish Trend"
-
-def generate_trading_signal(regime, rsi, macd_str, current_price, atr, risk="moderate"):
-    cfg = RISK_MULTIPLIERS.get(risk, RISK_MULTIPLIERS["moderate"])
-    stop = round(current_price - (cfg["stop"] * atr), 2)
-    target = round(current_price + (cfg["target"] * atr), 2)
-    entry = round(current_price * cfg["buffer"], 2)
-    action, color = "HOLD", "#cbd5e1"
-    if regime == "Bull" and rsi < 48 and "Bullish" in macd_str: action, color = "STRONG BUY", "#22c55e"
-    return {"action": action, "color": color, "entry": f"${entry}", "stop": f"${stop}", "target": f"${target}"}
-
-# --- 3. CORE PIPELINE ---
-def calculate_single_markov(ticker, window=20, threshold=0.012, risk="moderate"):
-    try:
-        clean_ticker = ticker.strip().upper().replace("NYSE:", "").replace("$", "")
-        raw_df = yf.download(clean_ticker, period="1y", interval="1d", progress=False)
-        df = standardize_ticker_data(raw_df, clean_ticker)
-        if df is None or len(df) < window: return None
-        
-        latest_rsi = calculate_rsi(df['close'])
-        latest_atr = calculate_atr(df)
-        macd = calculate_macd_signal_str(df['close'])
-        
-        df['State'] = np.log(df['close'] / df['close'].shift(1)).rolling(window).sum().apply(lambda v: 'Bull' if v > threshold else ('Bear' if v < -threshold else 'Sideways'))
-        
-        return {
-            "ticker": clean_ticker,
-            "current_regime": str(df['State'].iloc[-1]),
-            "current_price": float(df['close'].iloc[-1]),
-            "rsi": round(float(latest_rsi), 2),
-            "trade_signal": generate_trading_signal(str(df['State'].iloc[-1]), latest_rsi, macd, float(df['close'].iloc[-1]), latest_atr, risk)
-        }
-    except Exception as e:
-        logger.error(f"Pipeline failure for {ticker}: {e}")
+    if df is None or df.empty:
         return None
 
-# --- 4. ENDPOINTS ---
+    # Flatten MultiIndex columns if present
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(-1)
+    
+    # Normalize column text
+    df.columns = [str(c).lower().strip() for c in df.columns]
+    
+    # Loose mapping configuration
+    mapping = {
+        'adj close': 'close', 
+        'close': 'close', 
+        'high': 'high', 
+        'low': 'low', 
+        'open': 'open'
+    }
+    df = df.rename(columns=mapping)
+    
+    # Absolute minimum requirement survival check
+    if 'close' not in df.columns:
+        logger.warning(f"Ticker {ticker} rejected: missing 'close' price column.")
+        return None
+        
+    # Fallback assignment to prevent structural crashes
+    if 'high' not in df.columns: df['high'] = df['close']
+    if 'low' not in df.columns: df['low'] = df['close']
+    if 'open' not in df.columns: df['open'] = df['close']
+        
+    # Seamless gap filling
+    df = df.ffill().bfill()
+    return df[['close', 'high', 'low', 'open']]
+
+# 3. Indicator Calculations (Cleaned Data Implementations)
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50.0
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / (loss + 1e-9)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
+
+def generate_trading_signal(regime, rsi, price, p_bull, risk_profile):
+    # Standardised structural response schema
+    signal = {"action": "HOLD", "entry": "N/A", "stop": "N/A", "target": "N/A"}
+    
+    # Adaptive Risk Multipliers
+    multipliers = {
+        "conservative": {"stop": 0.03, "target": 0.06},
+        "moderate": {"stop": 0.05, "target": 0.10},
+        "aggressive": {"stop": 0.08, "target": 0.18}
+    }
+    m = multipliers.get(risk_profile, multipliers["moderate"])
+
+    if regime == "Bull" and rsi < 70 and p_bull > 0.60:
+        signal["action"] = "BUY"
+        signal["entry"] = f"${price:.2f}"
+        signal["stop"] = f"${(price * (1 - m['stop'])):.2f}"
+        signal["target"] = f"${(price * (1 + m['target'])):.2f}"
+    elif regime == "Bear" or rsi > 75:
+        signal["action"] = "SELL"
+        
+    return signal
+
+# 4. Core Markov Logic Circuit
+def calculate_single_markov(ticker, window=20, threshold=0.012, risk="moderate"):
+    # Clear out breaking strings and exchange suffixes
+    clean_ticker = ticker.strip().upper()
+    clean_ticker = clean_ticker.replace(".US", "").replace("NYSE:", "").replace("NASDAQ:", "").replace("$", "")
+    
+    try:
+        raw_df = yf.download(clean_ticker, period="1y", interval="1d", progress=False)
+        df = standardize_ticker_data(raw_df, clean_ticker)
+        
+        if df is None or len(df) < window:
+            return None
+            
+        # Isolate closing series and compute returns
+        close_series = df['close'].astype(float)
+        returns = close_series.pct_change().dropna()
+        
+        if len(returns) < window:
+            return None
+
+        # Execute Markov Switching Regression
+        model = MarkovRegression(returns, k_regimes=2, switching_variance=True)
+        res = model.fit(disp=False)
+        
+        # Determine current regime state based on smoothed probabilities
+        smoothed_probs = res.smoothed_marginal_probabilities
+        current_regime_index = np.argmax([smoothed_probs[0].iloc[-1], smoothed_probs[1].iloc[-1]])
+        
+        # Labeling mapping logic
+        regime_labels = {0: "Bear", 1: "Bull"}
+        current_regime = regime_labels.get(current_regime_index, "Unknown")
+        
+        # Calculate transition probability safety margin
+        p_bull_bull = float(res.regime_transition_matrix[1, 1]) if hasattr(res, 'regime_transition_matrix') else 0.50
+        
+        # Tail metrics
+        latest_price = float(close_series.iloc[-1])
+        trailing_return = float((close_series.iloc[-1] / close_series.iloc[-window] - 1) * 100)
+        latest_rsi = calculate_rsi(close_series)
+        
+        trade_signal = generate_trading_signal(current_regime, latest_rsi, latest_price, p_bull_bull, risk)
+        
+        # Prepare historical data slice for downstream visualization
+        # Reformats DataFrame to a standard JSON web array format [[date_string, close_price], ...]
+        history_df = df[['close']].tail(60).reset_index()
+        history_df.columns = ['date', 'close']
+        history_df['date'] = history_df['date'].dt.strftime('%Y-%m-%d')
+        history_list = history_df.values.tolist()
+
+        return {
+            "ticker": clean_ticker,
+            "current_price": latest_price,
+            "current_regime": current_regime,
+            "p_bull_bull": p_bull_bull,
+            "trailing_return": round(trailing_return, 2),
+            "rsi": round(latest_rsi, 1),
+            "trade_signal": trade_signal,
+            "history": history_list
+        }
+        
+    except Exception as e:
+        logger.error(f"Error compiling Markov execution metrics for {clean_ticker}: {e}")
+        return None
+
+# 5. API Core Endpoint Directives
 @app.get("/api/screener")
-def get_top_screener(token: str = Query(None)):
-    if not SECRET_KEY or token != SECRET_KEY: raise HTTPException(status_code=403)
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        results = [res for res in executor.map(lambda t: calculate_single_markov(t), SCREENER_TICKERS) if res]
-    return results
+def get_screener_matrix(token: str = Query(None)):
+    if not SECRET_KEY or token != SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Unauthorized API Token Access")
+        
+    default_universe = ["SPY", "QQQ", "IWM", "TLT", "GLD", "USO", "BTC-USD", "LEU"]
+    compiled_results = []
+    
+    for ticker in default_universe:
+        data = calculate_single_markov(ticker)
+        if data:
+            compiled_results.append(data)
+            
+    return compiled_results
 
 @app.get("/api/regime")
-def get_regime(ticker: str, token: str = Query(None)):
-    if not SECRET_KEY or token != SECRET_KEY: raise HTTPException(status_code=403)
-    res = calculate_single_markov(ticker)
-    if not res: raise HTTPException(status_code=404, detail="Data unavailable")
-    return res
+def get_individual_regime(ticker: str, token: str = Query(None)):
+    if not SECRET_KEY or token != SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Unauthorized API Token Access")
+        
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Missing required ticker parameter query")
+        
+    data = calculate_single_markov(ticker)
+    if not data:
+        raise HTTPException(status_code=404, detail="Ticker processing failed or symbol is missing")
+        
+    return data

@@ -21,7 +21,8 @@ CORE_UNIVERSE = [
     "RY.TO", "TD.TO", "SHOP.TO", "CP.TO", "CNR.TO"
 ]
 # This points to the Vercel-deployed instance
-BASE_DATA_URL = "https://markov-screener-proxy.vercel.app/api/data"
+BASE_DATA_URL = "# Ensure this matches the new Vercel path
+BASE_DATA_URL = "https://markov-screener-proxy.vercel.app/api/main/data""
 
 # ==========================================
 # MARKOV ENGINE

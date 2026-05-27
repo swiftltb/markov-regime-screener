@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+import yfinance as yf
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -19,7 +20,7 @@ CORE_UNIVERSE = [
     "LLY", "JPM", "V", "UNH", "WMT",
     "RY.TO", "TD.TO", "SHOP.TO", "CP.TO", "CNR.TO"
 ]
-# Corrected endpoint based on verified Vercel proxy configuration
+# This points to the Vercel-deployed instance
 BASE_DATA_URL = "https://markov-screener-proxy.vercel.app/api/data"
 
 # ==========================================
@@ -78,6 +79,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# PROXY ROUTE: Handles the fetch logic for both local and Vercel-deployed environments
+@app.get("/api/data/{ticker}")
+async def get_ticker_data(ticker: str):
+    try:
+        df = yf.download(ticker, period="1y", interval="1d")
+        if df.empty:
+            raise HTTPException(status_code=404, detail="Ticker not found")
+        # Return only the closing prices as a list
+        return df['Close'].tolist()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health_check():

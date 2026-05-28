@@ -1,96 +1,86 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import numpy as np, pandas as pd, functools, requests
-from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoregression
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import numpy as np
+import pandas as pd
+import requests
+import functools
 import uvicorn
+from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoregression
 
 app = FastAPI()
 
-# --- HARDENING: Session with Retry Logic ---
-session = requests.Session()
-retries = Retry(total=3, backoff_factor=1, status_forcelist=[502, 503, 504])
-session.mount('https://', HTTPAdapter(max_retries=retries))
-
-# --- CORS ---
+# --- HARDENED CORS: Always attached, even on crash ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://stockscreen.art", "https://www.stockscreen.art"],
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# --- ENGINE: Analysis Logic ---
+@app.middleware("http")
+async def add_cors_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
+# --- ROBUST ANALYSIS ENGINE ---
 def run_markov_analysis(ticker):
     try:
-        worker_url = f"https://raspy-recipe-da41.arthur-barabash.workers.dev/?ticker={ticker}"
+        # Fetching with 45s hard timeout
+        worker_url = f"https://YOUR_WORKER_URL_HERE/?ticker={ticker}"
         response = requests.get(worker_url, timeout=45)
+        response.raise_for_status()
         data = response.json()
-        
+
+        # Data Validation
+        if not data.get('closes') or len(data['closes']) < 30:
+            return {"ticker": ticker, "price": 0, "rsi": 0, "macd": 0, "regime": "Low Data"}
+
         df = pd.DataFrame({'Close': data['closes']})
+        # Calculate Returns: Ensure no NaNs or Infs
+        returns = np.log(df['Close'] / df['Close'].shift(1)).fillna(0)
         
-        # 1. PRE-PROCESSING: The "Math-Safe" Pipeline
-        # Calculate log returns and clean them completely
-        df['Returns'] = np.log(df['Close'] / df['Close'].shift(1))
-        df = df.replace([np.inf, -np.inf], np.nan).dropna()
-        
-        # 2. STATIONARITY CHECK
-        # If variance is too low (flatline data), skip model, return 'Neutral'
-        if df['Returns'].std() < 1e-6:
+        # Guard: Check for degenerate data (flatlines)
+        if returns.std() < 1e-9:
             regime = "Neutral"
         else:
-            # 3. ROBUST FITTING
-            # Scale returns (standardize variance)
-            scaled_returns = (df['Returns'] - df['Returns'].mean()) / df['Returns'].std()
-            
-            # Fitting in a controlled scope
-            model = MarkovAutoregression(scaled_returns, k_regimes=2, order=1, trend='c')
-            # Using 'nm' solver is mathematically required for high-stability SVD
-            res = model.fit(disp=False, method='nm', maxiter=5000)
-            
-            # Extract probability safely
-            prob = res.filtered_marginal_probabilities[0].iloc[-1]
-            regime = "Bull" if prob > 0.5 else "Bear"
+            # Model Fitting: Explicit scope for convergence
+            model = MarkovAutoregression(returns, k_regimes=2, order=1, trend='c')
+            res = model.fit(disp=False, method='nm', maxiter=2000)
+            regime = "Bull" if res.filtered_marginal_probabilities[0].iloc[-1] > 0.5 else "Bear"
 
-        # Calculate indicators
+        # Indicators
         delta = df['Close'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi = 100 - (100 / (1 + (gain / loss)))
-        macd = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
+        rsi = (100 - (100 / (1 + (gain / loss)))).iloc[-1]
+        macd = (df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()).iloc[-1]
 
         return {
             "ticker": ticker,
             "price": float(df['Close'].iloc[-1]),
-            "rsi": round(float(rsi.iloc[-1]), 2),
-            "macd": round(float(macd.iloc[-1]), 2),
+            "rsi": round(float(rsi), 2),
+            "macd": round(float(macd), 2),
             "regime": regime
         }
     except Exception as e:
-        # If it truly fails here, we log the specific ticker error
-        return {"ticker": ticker, "regime": "Math Error", "price": 0, "rsi": 0, "macd": 0}
+        return {"ticker": ticker, "price": 0, "rsi": 0, "macd": 0, "regime": "Error"}
+
 # --- CACHE ---
 @functools.lru_cache(maxsize=1)
-def get_cached_screener_data():
+def get_cached_data():
     tickers = ["AAPL", "NVDA", "MSFT", "TSLA", "AMD", "GOOGL", "AMZN", "META", "NFLX", "INTC", "CSCO", "PEP", "ADBE", "QCOM", "AVGO"]
     return [run_markov_analysis(t) for t in tickers]
 
 # --- ENDPOINTS ---
-@app.api_route("/health", methods=["GET", "HEAD"])
-@app.api_route("/api/health", methods=["GET", "HEAD"])
-async def health_check():
-    return {"status": "Brain Online"}
-
 @app.get("/screener-data")
 async def get_screener_data():
-    try:
-        data = get_cached_screener_data()
-        return JSONResponse(content={"status": "success", "data": data})
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+    return {"status": "success", "data": get_cached_data()}
+
+@app.get("/api/health")
+async def health():
+    return {"status": "online"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

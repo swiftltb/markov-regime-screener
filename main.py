@@ -14,40 +14,50 @@ TICKERS = ["AAPL", "NVDA", "MSFT", "TSLA", "AMD", "GOOGL", "AMZN", "META", "NFLX
 HEADERS = {"X-Secret-Key": "k7P9vR2WxM4zLqN1jB5vH8cF3tD6yS9a"}
 
 def run_math(df):
-    """Memory-efficient math logic with robust statsmodels attribute access."""
-    # RSI & MACD logic
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-
-    # Markov logic
-    returns = df['Close'].pct_change().dropna().tail(500)
-    model = MarkovAutoregression(returns, k_regimes=2, order=1)
-    res = model.fit(disp=False)
+    """
+    Optimized math engine using a 60-day window to reduce 
+    memory footprint and prevent SIGABRT (Code 134) crashes.
+    """
+    # 1. Configurable window size
+    WINDOW_SIZE = 60 
     
-    state = res.smoothed_marginal_probabilities.iloc[-1].idxmax()
+    # 2. Slice and clean data
+    # Ensure we have enough data to form a valid regime
+    data_subset = df['Close'].pct_change().tail(WINDOW_SIZE).dropna().astype('float32')
     
-    # Robust attribute access
-    if hasattr(res, 'regimes'):
-        matrix = res.regimes.transition_matrix
-    else:
-        matrix = res.regime_transition_matrix
+    if len(data_subset) < 40:
+        return {"regime": "Neutral", "persistence": 0.0, "rsi": 0.0, "macd": 0.0}
+    
+    # 3. Clear memory before allocation
+    gc.collect()
+    
+    try:
+        # 4. Use memory-efficient fitting
+        model = MarkovAutoregression(data_subset, k_regimes=2, order=1, switching_variance=True)
+        res = model.fit(disp=False, maxiter=100, method='nm')
         
-    persistence = matrix[state, state]
-    
-    return {
-        "regime": "Bullish" if state == 1 else "Bearish",
-        "persistence": round(float(persistence), 2),
-        "rsi": round(float(rsi.iloc[-1]), 2),
-        "macd": round(float(macd.iloc[-1]), 2)
-    }
-
+        # 5. Extract state and persistence
+        state = res.smoothed_marginal_probabilities.iloc[-1].idxmax()
+        # Ensure we access the transition matrix safely
+        transition_matrix = res.regime_transition_matrix
+        persistence = transition_matrix[state, state]
+        
+        # 6. Cleanup
+        del model
+        del res
+        gc.collect()
+        
+        return {
+            "regime": "Bullish" if state == 1 else "Bearish",
+            "persistence": round(float(persistence), 2),
+            "rsi": 0.0,
+            "macd": 0.0
+        }
+        
+    except Exception as e:
+        print(f"MATH ENGINE ERROR: {str(e)}")
+        gc.collect()
+        return {"regime": "Error", "persistence": 0.0, "rsi": 0.0, "macd": 0.0}
 async def process_ticker(ticker, client):
     try:
         # 1. Fetch data

@@ -1,54 +1,55 @@
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
-import yfinance as yf
-import pandas as pd
-import uvicorn
-import os
+from fastapi.templating import Jinja2Templates
 import requests
-import time
-import asyncio
+import json
 
 app = FastAPI()
+templates = Jinja2Templates(directory="templates")
 
-# --- CONFIGURATION ---
-BASE_DATA_URL = "https://markov-screener-proxy.vercel.app/api/main"
+# CONFIGURATION
+# Replace with your actual Cloudflare Worker URL
+PROXY_URL = "https://your-proxy-name.your-subdomain.workers.dev/"
 
-# --- DEBUGGING LOGIC ---
-def execute_debug_call():
-    """Manually triggered to avoid startup lifecycle issues."""
-    try:
-        # Give the environment a moment to stabilize
-        time.sleep(2) 
-        response = requests.get(f"{BASE_DATA_URL}/debug-path/AAPL")
-        print(f"--- SYSTEM DEBUG LOG: {response.status_code} | {response.text} ---")
-    except Exception as e:
-        print(f"--- SYSTEM DEBUG LOG ERROR: {e} ---")
-
-@app.get("/trigger-debug")
-async def trigger_debug(background_tasks: BackgroundTasks):
-    background_tasks.add_task(execute_debug_call)
-    return {"message": "Debug task queued. Check Render logs."}
-
-# --- ROUTES ---
-@app.get("/debug-path/{path:path}")
-async def debug_path(path: str):
-    return {"received_path": path}
-
-@app.get("/data/{ticker}")
-async def get_ticker_data(ticker: str):
-    df = await asyncio.to_thread(yf.download, ticker, period="1y", interval="1d")
-    return {"status": "success", "data": df.tail().to_dict()}
-
-@app.get("/", response_class=HTMLResponse)
-async def read_root():
-    return """
-    <html>
-        <body>
-            <h1>Engine Operational</h1>
-            <p>Trigger debug: <a href="/trigger-debug">Click here</a></p>
-        </body>
-    </html>
+# --- SHIELD LOGIC ---
+def fetch_data_from_shield(ticker):
     """
+    Acts as the 'Brain' calling the 'Shield' (Cloudflare Worker).
+    This keeps your Render IP clean and prevents blocking.
+    """
+    try:
+        response = requests.get(f"{PROXY_URL}?ticker={ticker}", timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        return {"error": "Shield returned status " + str(response.status_code)}
+    except Exception as e:
+        return {"error": str(e)}
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+# --- WEB UI ROUTES ---
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request, "data": None})
+
+@app.post("/analyze", response_class=HTMLResponse)
+async def analyze_ticker(request: Request, ticker: str = Form(...)):
+    # Fetch data via Shield
+    raw_data = fetch_data_from_shield(ticker.upper())
+    
+    # Simple Safety/Error Check
+    if "error" in raw_data:
+        return templates.TemplateResponse("index.html", {
+            "request": request, 
+            "error": f"Failed to retrieve data for {ticker}. Check Shield status."
+        })
+
+    # Prepare data for Chart.js and UI
+    return templates.TemplateResponse("index.html", {
+        "request": request, 
+        "ticker": ticker.upper(),
+        "data": raw_data
+    })
+
+# --- STATUS ENDPOINT ---
+@app.get("/health")
+def health_check():
+    return {"status": "Brain Online", "shield_url": PROXY_URL}

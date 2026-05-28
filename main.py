@@ -48,22 +48,31 @@ def run_math(df):
     }
 
 async def process_ticker(ticker, client):
-    """Processes ONE ticker, clears memory, returns."""
     try:
+        # 1. Fetch data
         resp = await client.get(f"{WORKER_URL}?ticker={ticker}", timeout=30.0)
         data = resp.json()
-        df = pd.DataFrame({'Close': data['closes']}).astype('float32')
         
-        result = run_math(df)
+        # 2. Convert and inspect data immediately in the logs
+        df = pd.DataFrame({'Close': data['closes']})
+        returns = df['Close'].pct_change().dropna()
         
-        # Send to DreamHost
-        await client.post(DREAMHOST_API, json={"ticker": ticker, "data": result}, headers=HEADERS)
-        
-        # Clear Memory
-        del df, data, result
-        gc.collect()
+        print(f"DIAGNOSTIC: Ticker {ticker}")
+        print(f"DIAGNOSTIC: Data rows: {len(returns)}")
+        print(f"DIAGNOSTIC: Any nulls? {returns.isnull().any()}")
+        print(f"DIAGNOSTIC: Any infinities? {np.isinf(returns).any()}")
+
+        # 3. Attempt math and report the specific error type
+        try:
+            model = MarkovAutoregression(returns, k_regimes=2, order=1)
+            res = model.fit(disp=False)
+            print(f"MATH SUCCESS: {ticker}")
+        except Exception as e:
+            print(f"MATH FAILURE: {ticker} | Error Type: {type(e).__name__} | Details: {str(e)}")
+            raise # This ensures the stack trace shows up in your Render dashboard
+
     except Exception as e:
-        print(f"Error {ticker}: {e}")
+        print(f"PIPELINE CRASH on {ticker}: {str(e)}")
 
 @app.get("/run-refresh")
 async def run_full_refresh():

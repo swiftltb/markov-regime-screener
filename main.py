@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import uvicorn, numpy as np, pandas as pd, functools, requests
+import numpy as np, pandas as pd, functools, requests
 from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoregression
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import uvicorn
 
 app = FastAPI()
 
@@ -25,26 +26,33 @@ app.add_middleware(
 # --- ENGINE: Analysis Logic ---
 def run_markov_analysis(ticker):
     try:
-        # Note: Ensure this URL is your actual deployed Worker URL
+        # REPLACE THIS URL WITH YOUR ACTUAL WORKER URL
         worker_url = f"https://raspy-recipe-da41.arthur-barabash.workers.dev/?ticker={ticker}"
         response = session.get(worker_url, timeout=20)
         response.raise_for_status()
         raw_data = response.json()
         
-        # Validation: Check for required keys returned by the Worker
+        # Validation
         if 'closes' not in raw_data or 'timestamps' not in raw_data:
             return {"ticker": ticker, "price": 0, "rsi": 0, "macd": 0, "regime": f"Error: Keys {list(raw_data.keys())}"}
             
         df = pd.DataFrame({'Close': raw_data['closes']})
         df.index = pd.to_datetime(raw_data['timestamps'], unit='s')
         
-        # Markov Regime Switching Analysis
-        df['Returns'] = np.log(df['Close'] / df['Close'].shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
-        model = MarkovAutoregression(df['Returns'], k_regimes=2, order=1)
-        res = model.fit(disp=False)
-        regime = "Bull" if res.filtered_marginal_probabilities[0].iloc[-1] > 0.5 else "Bear"
+        # --- FITTING BLOCK (STABILIZED) ---
+        df['Returns'] = np.log(df['Close'] / df['Close'].shift(1)).fillna(0)
+        scaled_returns = df['Returns'] * 100
         
-        # Technical Indicators
+        try:
+            # Using Nelder-Mead (nm) solver for better convergence stability
+            model = MarkovAutoregression(scaled_returns, k_regimes=2, order=1, trend='c')
+            res = model.fit(disp=False, method='nm', maxiter=2000)
+            regime = "Bull" if res.filtered_marginal_probabilities[0].iloc[-1] > 0.5 else "Bear"
+        except Exception:
+            regime = "Neutral"
+        # ----------------------------------
+        
+        # Indicators
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -68,7 +76,6 @@ def get_cached_screener_data():
     return [run_markov_analysis(t) for t in tickers]
 
 # --- ENDPOINTS ---
-# Added HEAD support for the external pinger to fix 405 errors
 @app.api_route("/health", methods=["GET", "HEAD"])
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health_check():

@@ -1,11 +1,15 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import uvicorn
+import uvicorn, threading, time, requests, functools
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoregression
 
 app = FastAPI()
 
-# 1. Mandatory CORS Middleware for WordPress Integration
+# 1. CORS & Security (Pre-flight fixed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://stockscreen.art", "https://www.stockscreen.art"],
@@ -14,27 +18,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 2. Explicit Pre-flight Handler to prevent 405 Method Not Allowed
 @app.options("/{rest_of_path:path}")
 async def preflight_handler(request: Request, rest_of_path: str):
     return JSONResponse(status_code=200, content={"status": "ok"})
 
-# 3. Screener Endpoint (Matches your WordPress Snippet)
+# 2. Financial Metrics Engine
+def calculate_metrics(df):
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rsi = 100 - (100 / (1 + (gain / loss)))
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    macd = exp1 - exp2
+    return rsi.iloc[-1], macd.iloc[-1]
+
+def run_markov_analysis(ticker):
+    try:
+        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        df['Returns'] = np.log(df['Close'] / df['Close'].shift(1))
+        model = MarkovAutoregression(df['Returns'].dropna(), k_regimes=2, order=1)
+        res = model.fit(disp=False)
+        regime = "Bull" if res.filtered_marginal_probabilities[0].iloc[-1] > 0.5 else "Bear"
+        rsi, macd = calculate_metrics(df)
+        return {
+            "ticker": ticker, 
+            "price": float(df['Close'].iloc[-1]), 
+            "rsi": round(float(rsi), 2), 
+            "macd": round(float(macd), 2), 
+            "regime": regime
+        }
+    except Exception as e:
+        return {"ticker": ticker, "error": str(e)}
+
+# 3. Cached Data Layer (15 Tickers)
+@functools.lru_cache(maxsize=1)
+def get_cached_screener_data():
+    tickers = ["AAPL", "NVDA", "MSFT", "TSLA", "AMD", "GOOGL", "AMZN", "META", "NFLX", "INTC", "CSCO", "PEP", "ADBE", "QCOM", "AVGO"]
+    return [run_markov_analysis(t) for t in tickers]
+
+# 4. API Endpoints
 @app.get("/screener-data")
 async def get_screener_data():
-    # Placeholder: Your Markov Engine Logic will be called here
-    return {
-        "status": "success",
-        "data": [
-            {"ticker": "AAPL", "price": 190.25, "rsi": 55, "regime": "Bull", "state": "Trending", "persistence": "High", "action": "HOLD"},
-            {"ticker": "NVDA", "price": 850.10, "rsi": 62, "regime": "Bull", "state": "Expansion", "persistence": "Very High", "action": "BUY"}
-        ]
-    }
+    return {"status": "success", "data": get_cached_screener_data()}
 
-# 4. Heartbeat/Health Check
 @app.get("/health")
 async def health_check():
     return {"status": "Brain Online"}
+
+# 5. Infrastructure (Heartbeat)
+def heartbeat():
+    while True:
+        try: requests.get("https://markov-screener-api.onrender.com/health")
+        except: pass
+        time.sleep(600)
+
+@app.on_event("startup")
+async def startup_event():
+    threading.Thread(target=heartbeat, daemon=True).start()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

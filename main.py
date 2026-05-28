@@ -10,23 +10,30 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://stockscreen.art"],
-    allow_methods=["POST"],
+    allow_methods=["POST", "GET"], # GET added for health check
     allow_headers=["*"],
 )
 
+# 1. Heartbeat/Health Check (Prevents 404 crash)
+@app.get("/")
+async def root():
+    return {"status": "online", "message": "Compute Engine Ready"}
+
+# 2. Computation Logic
 def run_math(df):
     try:
-        # 1. Technical Indicators
+        # Technical Indicators
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         rsi = float(100 - (100 / (1 + rs.iloc[-1])))
+        
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
         exp2 = df['Close'].ewm(span=26, adjust=False).mean()
         macd = float((exp1 - exp2).iloc[-1])
 
-        # 2. HMM Regime Detection
+        # HMM Regime Detection
         returns = df['Close'].pct_change().dropna().values.reshape(-1, 1)
         data_subset = returns[-60:]
         model = hmm.GaussianHMM(n_components=2, covariance_type="full", n_iter=100)
@@ -38,18 +45,19 @@ def run_math(df):
         regime = "Bullish" if current_state == bullish_state else "Bearish"
 
         return {
-            "regime": regime, "persistence": round(persistence, 2),
-            "rsi": round(rsi, 2), "macd": round(macd, 2),
+            "regime": regime, 
+            "persistence": round(persistence, 2),
+            "rsi": round(rsi, 2), 
+            "macd": round(macd, 2),
             "price": float(df['Close'].iloc[-1]),
             "year_high": float(df['Close'].max()),
             "year_low": float(df['Close'].min())
         }
-    except Exception:
-        return {"regime": "Error", "persistence": 0.0, "rsi": 0.0, "macd": 0.0, "price": 0.0, "year_high": 0.0, "year_low": 0.0}
+    except Exception as e:
+        return {"regime": "Error", "details": str(e)}
 
 @app.post("/analyze")
 async def analyze(request: Request):
     payload = await request.json()
-    # Expects: {"data": [close_price_1, close_price_2, ...]}
     df = pd.DataFrame(payload["data"], columns=["Close"])
     return run_math(df)

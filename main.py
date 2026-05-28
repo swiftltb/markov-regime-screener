@@ -10,16 +10,16 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://stockscreen.art"],
-    allow_methods=["POST", "GET"], # GET added for health check
+    allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
 
-# 1. Heartbeat/Health Check (Prevents 404 crash)
+# 1. Health Check (Matches Dashboard Path /)
 @app.get("/")
 async def root():
     return {"status": "online", "message": "Compute Engine Ready"}
 
-# 2. Computation Logic
+# 2. Computation Engine
 def run_math(df):
     try:
         # Technical Indicators
@@ -59,5 +59,6 @@ def run_math(df):
 @app.post("/analyze")
 async def analyze(request: Request):
     payload = await request.json()
+    # Expects JSON: {"data": [price1, price2, ...]}
     df = pd.DataFrame(payload["data"], columns=["Close"])
     return run_math(df)

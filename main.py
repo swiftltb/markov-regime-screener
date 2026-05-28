@@ -13,26 +13,32 @@ TICKERS = ["AAPL", "NVDA", "MSFT", "TSLA", "AMD", "GOOGL", "AMZN", "META", "NFLX
 HEADERS = {"X-Secret-Key": "k7P9vR2WxM4zLqN1jB5vH8cF3tD6yS9a"}
 
 def run_math(df):
-    """Memory-efficient math logic."""
-    # RSI
+    """Memory-efficient math logic with robust statsmodels attribute access."""
+    # RSI & MACD logic
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
 
-    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     macd = exp1 - exp2
 
-    # Markov
+    # Markov logic
     returns = df['Close'].pct_change().dropna().tail(500)
     model = MarkovAutoregression(returns, k_regimes=2, order=1)
     res = model.fit(disp=False)
     
     state = res.smoothed_marginal_probabilities.iloc[-1].idxmax()
-    persistence = res.regime_transition_matrix[state, state]
+    
+    # Robust attribute access
+    if hasattr(res, 'regimes'):
+        matrix = res.regimes.transition_matrix
+    else:
+        matrix = res.regime_transition_matrix
+        
+    persistence = matrix[state, state]
     
     return {
         "regime": "Bullish" if state == 1 else "Bearish",

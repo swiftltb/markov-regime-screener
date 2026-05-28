@@ -7,61 +7,57 @@ from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoreg
 app = FastAPI()
 
 # Configuration
-DREAMHOST_API = "stockscreen.art/update_cache.php"
+DREAMHOST_API = "https://stockscreen.art/update_cache.php"
 WORKER_URL = "https://raspy-recipe-da41.arthur-barabash.workers.dev/"
 TICKERS = ["AAPL", "NVDA", "MSFT", "TSLA", "AMD", "GOOGL", "AMZN", "META", "NFLX", "AVGO", "INTC", "CSCO", "PEP", "ADBE", "COST"]
+HEADERS = {"X-Secret-Key": "k7P9vR2WxM4zLqN1jB5vH8cF3tD6yS9a"}
 
 def run_math(df):
-    """Calculates indicators and Markov regime switching."""
-    # 1. RSI Calculation
+    """Memory-efficient math logic."""
+    # RSI
     delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
 
-    # 2. MACD Calculation
+    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     macd = exp1 - exp2
 
-    # 3. Markov Regime Switching (Limited window for memory safety)
+    # Markov
     returns = df['Close'].pct_change().dropna().tail(500)
     model = MarkovAutoregression(returns, k_regimes=2, order=1)
     res = model.fit(disp=False)
     
-    current_state = res.smoothed_marginal_probabilities.iloc[-1].idxmax()
-    persistence = res.regime_transition_matrix[current_state, current_state]
+    state = res.smoothed_marginal_probabilities.iloc[-1].idxmax()
+    persistence = res.regime_transition_matrix[state, state]
     
     return {
-        "regime": "Bullish" if current_state == 1 else "Bearish",
+        "regime": "Bullish" if state == 1 else "Bearish",
         "persistence": round(float(persistence), 2),
         "rsi": round(float(rsi.iloc[-1]), 2),
         "macd": round(float(macd.iloc[-1]), 2)
     }
 
 async def process_ticker(ticker, client):
-    """Stateless pipeline: Pull -> Process -> Send -> Wipe."""
+    """Processes ONE ticker, clears memory, returns."""
     try:
-        # Fetch
-        response = await client.get(f"{WORKER_URL}?ticker={ticker}", timeout=15.0)
-        data = response.json()
-        
-        # Process in scope
+        resp = await client.get(f"{WORKER_URL}?ticker={ticker}", timeout=30.0)
+        data = resp.json()
         df = pd.DataFrame({'Close': data['closes']}).astype('float32')
+        
         result = run_math(df)
         
-        # Send
-        await client.post(DREAMHOST_API, json={"ticker": ticker, "data": result})
+        # Send to DreamHost
+        await client.post(DREAMHOST_API, json={"ticker": ticker, "data": result}, headers=HEADERS)
         
-        # Clean
-        del df
-        del data
+        # Clear Memory
+        del df, data, result
         gc.collect()
-        return True
     except Exception as e:
         print(f"Error {ticker}: {e}")
-        return False
 
 @app.get("/run-refresh")
 async def run_full_refresh():

@@ -1,27 +1,46 @@
+import requests
+import threading
+import time
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-import requests
-import json
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
-# CONFIGURATION
-# Replace with your actual Cloudflare Worker URL
-PROXY_URL = "https://your-proxy-name.your-subdomain.workers.dev/"
+# --- CONFIGURATION ---
+# Replace with your Cloudflare Worker URL
+PROXY_URL = "https://raspy-recipe-da41.arthur-barabash.workers.dev/"
+# Replace with your ACTUAL Render App URL (e.g., https://your-app-name.onrender.com)
+SELF_URL = "https://markov-screener-api.onrender.com." 
+
+# --- HEARTBEAT PINGER (The Silent Heartbeat) ---
+def start_heartbeat():
+    def ping():
+        while True:
+            try:
+                # Pings the /health endpoint to prevent the Render instance from spinning down
+                requests.get(f"{SELF_URL}/health")
+                print("Heartbeat sent to keep Render awake.")
+            except Exception as e:
+                print(f"Heartbeat failed: {e}")
+            time.sleep(600)  # Pings every 10 minutes
+            
+    thread = threading.Thread(target=ping, daemon=True)
+    thread.start()
+
+@app.on_event("startup")
+async def startup_event():
+    start_heartbeat()
 
 # --- SHIELD LOGIC ---
 def fetch_data_from_shield(ticker):
     """
-    Acts as the 'Brain' calling the 'Shield' (Cloudflare Worker).
-    This keeps your Render IP clean and prevents blocking.
+    Fetches data through the Cloudflare proxy to avoid IP blocking.
     """
     try:
         response = requests.get(f"{PROXY_URL}?ticker={ticker}", timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        return {"error": "Shield returned status " + str(response.status_code)}
+        return response.json() if response.status_code == 200 else {"error": "Shield Error"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -32,24 +51,13 @@ async def read_root(request: Request):
 
 @app.post("/analyze", response_class=HTMLResponse)
 async def analyze_ticker(request: Request, ticker: str = Form(...)):
-    # Fetch data via Shield
     raw_data = fetch_data_from_shield(ticker.upper())
-    
-    # Simple Safety/Error Check
-    if "error" in raw_data:
-        return templates.TemplateResponse("index.html", {
-            "request": request, 
-            "error": f"Failed to retrieve data for {ticker}. Check Shield status."
-        })
-
-    # Prepare data for Chart.js and UI
     return templates.TemplateResponse("index.html", {
         "request": request, 
         "ticker": ticker.upper(),
         "data": raw_data
     })
 
-# --- STATUS ENDPOINT ---
 @app.get("/health")
 def health_check():
     return {"status": "Brain Online", "shield_url": PROXY_URL}

@@ -1,86 +1,71 @@
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import numpy as np
+import gc
 import pandas as pd
-import requests
-import functools
-import uvicorn
+import httpx
+from fastapi import FastAPI
 from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoregression
 
 app = FastAPI()
 
-# --- HARDENED CORS: Always attached, even on crash ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+# Configuration
+DREAMHOST_API = "stockscreen.art/update_cache.php"
+WORKER_URL = "https://raspy-recipe-da41.arthur-barabash.workers.dev/"
+TICKERS = ["AAPL", "NVDA", "MSFT", "TSLA", "AMD", "GOOGL", "AMZN", "META", "NFLX", "AVGO", "INTC", "CSCO", "PEP", "ADBE", "COST"]
 
-@app.middleware("http")
-async def add_cors_header(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    return response
+def run_math(df):
+    """Calculates indicators and Markov regime switching."""
+    # 1. RSI Calculation
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
 
-# --- ROBUST ANALYSIS ENGINE ---
-def run_markov_analysis(ticker):
+    # 2. MACD Calculation
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    macd = exp1 - exp2
+
+    # 3. Markov Regime Switching (Limited window for memory safety)
+    returns = df['Close'].pct_change().dropna().tail(500)
+    model = MarkovAutoregression(returns, k_regimes=2, order=1)
+    res = model.fit(disp=False)
+    
+    current_state = res.smoothed_marginal_probabilities.iloc[-1].idxmax()
+    persistence = res.regime_transition_matrix[current_state, current_state]
+    
+    return {
+        "regime": "Bullish" if current_state == 1 else "Bearish",
+        "persistence": round(float(persistence), 2),
+        "rsi": round(float(rsi.iloc[-1]), 2),
+        "macd": round(float(macd.iloc[-1]), 2)
+    }
+
+async def process_ticker(ticker, client):
+    """Stateless pipeline: Pull -> Process -> Send -> Wipe."""
     try:
-        # Fetching with 45s hard timeout
-        worker_url = f"https://raspy-recipe-da41.arthur-barabash.workers.dev/?ticker={ticker}"
-        response = requests.get(worker_url, timeout=45)
-        response.raise_for_status()
+        # Fetch
+        response = await client.get(f"{WORKER_URL}?ticker={ticker}", timeout=15.0)
         data = response.json()
-
-        # Data Validation
-        if not data.get('closes') or len(data['closes']) < 30:
-            return {"ticker": ticker, "price": 0, "rsi": 0, "macd": 0, "regime": "Low Data"}
-
-        df = pd.DataFrame({'Close': data['closes']})
-        # Calculate Returns: Ensure no NaNs or Infs
-        returns = np.log(df['Close'] / df['Close'].shift(1)).fillna(0)
         
-        # Guard: Check for degenerate data (flatlines)
-        if returns.std() < 1e-9:
-            regime = "Neutral"
-        else:
-            # Model Fitting: Explicit scope for convergence
-            model = MarkovAutoregression(returns, k_regimes=2, order=1, trend='c')
-            res = model.fit(disp=False, method='nm', maxiter=2000)
-            regime = "Bull" if res.filtered_marginal_probabilities[0].iloc[-1] > 0.5 else "Bear"
-
-        # Indicators
-        delta = df['Close'].diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi = (100 - (100 / (1 + (gain / loss)))).iloc[-1]
-        macd = (df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()).iloc[-1]
-
-        return {
-            "ticker": ticker,
-            "price": float(df['Close'].iloc[-1]),
-            "rsi": round(float(rsi), 2),
-            "macd": round(float(macd), 2),
-            "regime": regime
-        }
+        # Process in scope
+        df = pd.DataFrame({'Close': data['closes']}).astype('float32')
+        result = run_math(df)
+        
+        # Send
+        await client.post(DREAMHOST_API, json={"ticker": ticker, "data": result})
+        
+        # Clean
+        del df
+        del data
+        gc.collect()
+        return True
     except Exception as e:
-        return {"ticker": ticker, "price": 0, "rsi": 0, "macd": 0, "regime": "Error"}
+        print(f"Error {ticker}: {e}")
+        return False
 
-# --- CACHE ---
-@functools.lru_cache(maxsize=1)
-def get_cached_data():
-    tickers = ["AAPL", "NVDA", "MSFT", "TSLA", "AMD", "GOOGL", "AMZN", "META", "NFLX", "INTC", "CSCO", "PEP", "ADBE", "QCOM", "AVGO"]
-    return [run_markov_analysis(t) for t in tickers]
-
-# --- ENDPOINTS ---
-@app.get("/screener-data")
-async def get_screener_data():
-    return {"status": "success", "data": get_cached_data()}
-
-@app.get("/api/health")
-async def health():
-    return {"status": "online"}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/run-refresh")
+async def run_full_refresh():
+    async with httpx.AsyncClient() as client:
+        for ticker in TICKERS:
+            await process_ticker(ticker, client)
+    return {"status": "Complete"}

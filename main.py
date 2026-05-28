@@ -4,7 +4,6 @@ from fastapi.responses import JSONResponse
 import uvicorn, threading, time, requests, functools
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoregression
 
 app = FastAPI()
@@ -22,7 +21,7 @@ app.add_middleware(
 async def preflight_handler(request: Request, rest_of_path: str):
     return JSONResponse(status_code=200, content={"status": "ok"})
 
-# 2. Financial Metrics Engine
+# 2. Financial Metrics Engine (The Brain)
 def calculate_metrics(df):
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -35,12 +34,25 @@ def calculate_metrics(df):
 
 def run_markov_analysis(ticker):
     try:
-        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        # ARCHITECTURE ENFORCED: Render only speaks to the proxy
+        worker_url = f"https://raspy-recipe-da41.arthur-barabash.workers.dev//?ticker={ticker}"
+        response = requests.get(worker_url, timeout=20)
+        
+        if response.status_code != 200:
+            return {"ticker": ticker, "error": "Proxy communication failure"}
+        
+        raw_data = response.json()
+        df = pd.DataFrame({'Close': raw_data['closes']})
+        df.index = pd.to_datetime(raw_data['timestamps'], unit='s')
+        
+        # Markov Analysis
         df['Returns'] = np.log(df['Close'] / df['Close'].shift(1))
         model = MarkovAutoregression(df['Returns'].dropna(), k_regimes=2, order=1)
         res = model.fit(disp=False)
         regime = "Bull" if res.filtered_marginal_probabilities[0].iloc[-1] > 0.5 else "Bear"
+        
         rsi, macd = calculate_metrics(df)
+        
         return {
             "ticker": ticker, 
             "price": float(df['Close'].iloc[-1]), 
@@ -49,7 +61,7 @@ def run_markov_analysis(ticker):
             "regime": regime
         }
     except Exception as e:
-        return {"ticker": ticker, "error": str(e)}
+        return {"ticker": ticker, "error": f"Brain processing error: {str(e)}"}
 
 # 3. Cached Data Layer (15 Tickers)
 @functools.lru_cache(maxsize=1)

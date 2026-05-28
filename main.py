@@ -9,17 +9,16 @@ app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
 # --- CONFIGURATION ---
-# Replace with your Cloudflare Worker URL
+# Replace with your actual Cloudflare Worker URL
 PROXY_URL = "https://raspy-recipe-da41.arthur-barabash.workers.dev/"
-# Replace with your ACTUAL Render App URL (e.g., https://your-app-name.onrender.com)
-SELF_URL = "https://markov-screener-api.onrender.com." 
+# Your Render URL
+SELF_URL = "https://markov-screener-api.onrender.com."
 
-# --- HEARTBEAT PINGER (The Silent Heartbeat) ---
+# --- HEARTBEAT PINGER ---
 def start_heartbeat():
     def ping():
         while True:
             try:
-                # Pings the /health endpoint to prevent the Render instance from spinning down
                 requests.get(f"{SELF_URL}/health")
                 print("Heartbeat sent to keep Render awake.")
             except Exception as e:
@@ -35,9 +34,6 @@ async def startup_event():
 
 # --- SHIELD LOGIC ---
 def fetch_data_from_shield(ticker):
-    """
-    Fetches data through the Cloudflare proxy to avoid IP blocking.
-    """
     try:
         response = requests.get(f"{PROXY_URL}?ticker={ticker}", timeout=10)
         return response.json() if response.status_code == 200 else {"error": "Shield Error"}
@@ -47,14 +43,15 @@ def fetch_data_from_shield(ticker):
 # --- WEB UI ROUTES ---
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "data": None})
+    # Corrected TemplateResponse syntax: request is the first argument
+    return templates.TemplateResponse(request, "index.html", {"data": None})
 
 @app.post("/analyze", response_class=HTMLResponse)
 async def analyze_ticker(request: Request, ticker: str = Form(...)):
     raw_data = fetch_data_from_shield(ticker.upper())
-    return templates.TemplateResponse("index.html", {
-        "request": request, 
-        "ticker": ticker.upper(),
+    # Corrected TemplateResponse syntax
+    return templates.TemplateResponse(request, "index.html", {
+        "ticker": ticker.upper(), 
         "data": raw_data
     })
 

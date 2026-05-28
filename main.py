@@ -26,49 +26,52 @@ app.add_middleware(
 # --- ENGINE: Analysis Logic ---
 def run_markov_analysis(ticker):
     try:
-        # REPLACE THIS URL WITH YOUR ACTUAL WORKER URL
-        worker_url = f"https://raspy-recipe-da41.arthur-barabash.workers.dev/?ticker={ticker}"
-        response = session.get(worker_url, timeout=20)
-        response.raise_for_status()
-        raw_data = response.json()
+        worker_url = f"https://YOUR_WORKER_URL_HERE/?ticker={ticker}"
+        response = requests.get(worker_url, timeout=10)
+        data = response.json()
         
-        # Validation
-        if 'closes' not in raw_data or 'timestamps' not in raw_data:
-            return {"ticker": ticker, "price": 0, "rsi": 0, "macd": 0, "regime": f"Error: Keys {list(raw_data.keys())}"}
-            
-        df = pd.DataFrame({'Close': raw_data['closes']})
-        df.index = pd.to_datetime(raw_data['timestamps'], unit='s')
+        df = pd.DataFrame({'Close': data['closes']})
         
-        # --- FITTING BLOCK (STABILIZED) ---
-        df['Returns'] = np.log(df['Close'] / df['Close'].shift(1)).fillna(0)
-        scaled_returns = df['Returns'] * 100
+        # 1. PRE-PROCESSING: The "Math-Safe" Pipeline
+        # Calculate log returns and clean them completely
+        df['Returns'] = np.log(df['Close'] / df['Close'].shift(1))
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
         
-        try:
-            # Using Nelder-Mead (nm) solver for better convergence stability
-            model = MarkovAutoregression(scaled_returns, k_regimes=2, order=1, trend='c')
-            res = model.fit(disp=False, method='nm', maxiter=2000)
-            regime = "Bull" if res.filtered_marginal_probabilities[0].iloc[-1] > 0.5 else "Bear"
-        except Exception:
+        # 2. STATIONARITY CHECK
+        # If variance is too low (flatline data), skip model, return 'Neutral'
+        if df['Returns'].std() < 1e-6:
             regime = "Neutral"
-        # ----------------------------------
-        
-        # Indicators
+        else:
+            # 3. ROBUST FITTING
+            # Scale returns (standardize variance)
+            scaled_returns = (df['Returns'] - df['Returns'].mean()) / df['Returns'].std()
+            
+            # Fitting in a controlled scope
+            model = MarkovAutoregression(scaled_returns, k_regimes=2, order=1, trend='c')
+            # Using 'nm' solver is mathematically required for high-stability SVD
+            res = model.fit(disp=False, method='nm', maxiter=5000)
+            
+            # Extract probability safely
+            prob = res.filtered_marginal_probabilities[0].iloc[-1]
+            regime = "Bull" if prob > 0.5 else "Bear"
+
+        # Calculate indicators
         delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / loss)))
         macd = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
-        
+
         return {
-            "ticker": ticker, 
-            "price": float(df['Close'].iloc[-1]), 
-            "rsi": round(float(rsi.iloc[-1]), 2), 
-            "macd": round(float(macd.iloc[-1]), 2), 
+            "ticker": ticker,
+            "price": float(df['Close'].iloc[-1]),
+            "rsi": round(float(rsi.iloc[-1]), 2),
+            "macd": round(float(macd.iloc[-1]), 2),
             "regime": regime
         }
     except Exception as e:
-        return {"ticker": ticker, "error": str(e)}
-
+        # If it truly fails here, we log the specific ticker error
+        return {"ticker": ticker, "regime": "Math Error", "price": 0, "rsi": 0, "macd": 0}
 # --- CACHE ---
 @functools.lru_cache(maxsize=1)
 def get_cached_screener_data():

@@ -1,5 +1,6 @@
 import gc
 import pandas as pd
+import numpy as np
 import httpx
 from fastapi import FastAPI
 from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoregression

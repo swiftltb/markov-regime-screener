@@ -27,7 +27,7 @@ app.add_middleware(
 def run_markov_analysis(ticker):
     try:
         worker_url = f"https://raspy-recipe-da41.arthur-barabash.workers.dev/?ticker={ticker}"
-        response = requests.get(worker_url, timeout=10)
+        response = requests.get(worker_url, timeout=45)
         data = response.json()
         
         df = pd.DataFrame({'Close': data['closes']})

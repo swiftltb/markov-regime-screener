@@ -28,7 +28,7 @@ async def add_cors_header(request: Request, call_next):
 def run_markov_analysis(ticker):
     try:
         # Fetching with 45s hard timeout
-        worker_url = f"https://YOUR_WORKER_URL_HERE/?ticker={ticker}"
+        worker_url = f"https://raspy-recipe-da41.arthur-barabash.workers.dev/?ticker={ticker}"
         response = requests.get(worker_url, timeout=45)
         response.raise_for_status()
         data = response.json()

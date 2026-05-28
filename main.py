@@ -1,30 +1,33 @@
 import requests
 import threading
 import time
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
-templates = Jinja2Templates(directory="templates")
+
+# --- SAFETY LOGIC: CORS CONFIGURATION ---
+# Allows your WordPress site to request data from the Brain
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://stockscreen.art"], 
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- CONFIGURATION ---
-# Replace with your actual Cloudflare Worker URL
 PROXY_URL = "https://raspy-recipe-da41.arthur-barabash.workers.dev/"
-# Your Render URL
-SELF_URL = "https://markov-screener-api.onrender.com."
+SELF_URL = "https://markov-screener-api.onrender.com" 
 
-# --- HEARTBEAT PINGER ---
+# --- HEARTBEAT PINGER (Render Keep-Alive) ---
 def start_heartbeat():
     def ping():
         while True:
             try:
                 requests.get(f"{SELF_URL}/health")
-                print("Heartbeat sent to keep Render awake.")
             except Exception as e:
-                print(f"Heartbeat failed: {e}")
-            time.sleep(600)  # Pings every 10 minutes
-            
+                print(f"Engine Status Alert: Heartbeat failed: {e}")
+            time.sleep(600)
     thread = threading.Thread(target=ping, daemon=True)
     thread.start()
 
@@ -32,7 +35,7 @@ def start_heartbeat():
 async def startup_event():
     start_heartbeat()
 
-# --- SHIELD LOGIC ---
+# --- BACKEND LOGIC: SHIELD INTEGRATION ---
 def fetch_data_from_shield(ticker):
     try:
         response = requests.get(f"{PROXY_URL}?ticker={ticker}", timeout=10)
@@ -40,21 +43,21 @@ def fetch_data_from_shield(ticker):
     except Exception as e:
         return {"error": str(e)}
 
-# --- WEB UI ROUTES ---
-@app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request):
-    # Corrected TemplateResponse syntax: request is the first argument
-    return templates.TemplateResponse(request, "index.html", {"data": None})
-
-@app.post("/analyze", response_class=HTMLResponse)
-async def analyze_ticker(request: Request, ticker: str = Form(...)):
-    raw_data = fetch_data_from_shield(ticker.upper())
-    # Corrected TemplateResponse syntax
-    return templates.TemplateResponse(request, "index.html", {
-        "ticker": ticker.upper(), 
-        "data": raw_data
-    })
+# --- API ENDPOINTS ---
+@app.get("/analyze/{ticker}")
+async def analyze(ticker: str):
+    # Safety Logic: Simple validation
+    if not ticker or len(ticker) > 5:
+        return {"error": "Invalid Ticker"}
+    
+    data = fetch_data_from_shield(ticker.upper())
+    return {"ticker": ticker.upper(), "payload": data}
 
 @app.get("/health")
 def health_check():
-    return {"status": "Brain Online", "shield_url": PROXY_URL}
+    # Engine Status Alert Box
+    return {"status": "Brain Online", "shield_status": "Active"}
+
+# --- DISCLAIMER CALLOUT ---
+# API provides raw data for UI consumption; ensure WordPress displays this disclaimer
+# "Disclaimer: This data is for informational purposes and does not constitute financial advice."

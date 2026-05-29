@@ -10,21 +10,17 @@ import os
 
 app = FastAPI()
 
-# --- Security ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://stockscreen.art", "https://www.stockscreen.art"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# --- Add the Health Check HERE ---
+
 @app.get("/")
 async def root():
     return {"status": "Engine Operational"}
 
-# --- Then your existing functions follow ---
-def calculate_rsi(data, window=14):
-# --- Indicator Calculations ---
 def calculate_rsi(data, window=14):
     delta = data.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -39,12 +35,10 @@ def calculate_macd(data, slow=26, fast=12, signal=9):
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd, signal_line
 
-# --- Analysis Core ---
 def perform_analysis(df):
     close = df['Close']
     returns = close.pct_change().dropna().values.reshape(-1, 1)
     
-    # HMM Regime Detection
     model = hmm.GaussianHMM(n_components=2, covariance_type="full", n_iter=100)
     model.fit(returns)
     regimes = model.predict(returns)
@@ -52,7 +46,6 @@ def perform_analysis(df):
     rsi = calculate_rsi(close).iloc[-1]
     macd, _ = calculate_macd(close)
     
-    # Recommendation Logic
     is_bullish = regimes[-1] == 1
     prob = model.predict_proba(returns[-1:])
     
@@ -72,7 +65,6 @@ def perform_analysis(df):
         "recommendation_reason": reason
     }
 
-# --- API Route ---
 @app.post("/analyze")
 async def analyze(request: Request):
     payload = await request.json()
@@ -83,7 +75,6 @@ async def analyze(request: Request):
         return {"error": "Ticker required", "status": "Error"}
 
     try:
-        # FMP provided by Worker OR YFinance Fetch
         if raw_data:
             df = pd.DataFrame(raw_data)
         else:
@@ -106,4 +97,5 @@ async def analyze(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

@@ -59,6 +59,15 @@ def run_math(df):
 @app.post("/analyze")
 async def analyze(request: Request):
     payload = await request.json()
-    # Expects JSON: {"data": [price1, price2, ...]}
-    df = pd.DataFrame(payload["data"], columns=["Close"])
+    
+    # Check if payload is a dict (has "data" key) or a direct list
+    if isinstance(payload, dict) and "data" in payload:
+        data_to_process = payload["data"]
+    elif isinstance(payload, list):
+        data_to_process = payload
+    else:
+        # Fallback if structure is unknown
+        return {"regime": "Error", "details": "Invalid payload format"}
+
+    df = pd.DataFrame(data_to_process, columns=["Close"])
     return run_math(df)

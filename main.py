@@ -1,117 +1,69 @@
+import time
+import random
+import yfinance as yf
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import numpy as np
-from hmmlearn import hmm
+from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://stockscreen.art", "https://www.stockscreen.art"],
-    allow_methods=["POST", "GET"],
-    allow_headers=["*"],
-)
+# --- In-Memory Cache ---
+data_cache = {}
 
-def get_recommendation(regime, rsi, macd, signal, prev_macd, prev_signal, volume_is_high):
-    # Detect Crossovers
-    bullish_crossover = (prev_macd <= prev_signal) and (macd > signal)
-    bearish_crossover = (prev_macd >= prev_signal) and (macd < signal)
+def get_data_safely(ticker):
+    # 1. Check Cache
+    if ticker in data_cache:
+        if datetime.now() < data_cache[ticker]['expiry']:
+            return data_cache[ticker]['data']
 
-    if regime == "Bullish":
-        if rsi < 30 and bullish_crossover and volume_is_high: return "Strong Buy"
-        if rsi < 50 and bullish_crossover: return "Buy"
-        return "Hold"
-    else: # Bearish Regime
-        if rsi > 70 and bearish_crossover and volume_is_high: return "Strong Sell"
-        if rsi > 50 and bearish_crossover: return "Sell"
-        return "Hold"
+    # 2. Hybrid Routing
+    if ticker.endswith('.TO'):
+        # Polite throttling for YFinance
+        time.sleep(random.uniform(5, 10))
+        try:
+            stock = yf.Ticker(ticker)
+            df = stock.history(period="1mo")
+            if not df.empty:
+                data_cache[ticker] = {'data': df, 'expiry': datetime.now() + timedelta(hours=4)}
+                return df
+        except Exception as e:
+            print(f"YFinance Error: {e}")
+            return None
+    else:
+        # FMP Logic placeholder
+        return None 
 
-# 1. Health Check
-@app.get("/")
-async def root():
-    return {"status": "online", "message": "Compute Engine Ready"}
-
-# 2. Computation Engine
-def run_math(df):
-    try:
-        # Technical Indicators
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        rsi = float(100 - (100 / (1 + rs.iloc[-1])))
+@app.get("/analyze", response_class=HTMLResponse)
+async def analyze(ticker: str):
+    data = get_data_safely(ticker)
+    
+    # Check if engine is alive
+    status = "Operational" if data is not None else "Error/Engine Heartbeat Fail"
+    
+    # HTML response structure (Responsive UI with Safety Logic)
+    return f"""
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    </head>
+    <body>
+        <div id="safety-alert" style="background: { '#ffcccc' if data is None else '#ccffcc' }; padding: 10px;">
+            Engine Status: {status}
+        </div>
         
-        # MACD & Signal Line
-        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-        macd_line = exp1 - exp2
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        <h2>{ticker} Analysis</h2>
+        <div id="screener-table">...</div>
+        <div id="analysis-modal">...</div>
+        <canvas id="tickerChart"></canvas>
         
-        # Volume Confirmation
-        avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
-        volume_is_high = float(df['Volume'].iloc[-1]) > float(avg_vol)
-        
-        # Current and Previous values
-        macd = float(macd_line.iloc[-1])
-        signal = float(signal_line.iloc[-1])
-        prev_macd = float(macd_line.iloc[-2])
-        prev_signal = float(signal_line.iloc[-2])
+        <script>
+            // Chart.js Data Mapping logic goes here
+        </script>
+    </body>
+    </html>
+    """
 
-        # HMM Regime Detection
-        returns = df['Close'].pct_change().dropna().values.reshape(-1, 1)
-        data_subset = returns[-60:]
-        model = hmm.GaussianHMM(n_components=2, covariance_type="full", n_iter=100)
-        model.fit(data_subset)
-        
-        # Predict state and get probabilities
-        states = model.predict(data_subset)
-        probs = model.predict_proba(data_subset)
-        
-        current_state = states[-1]
-        current_prob = float(probs[-1, current_state]) # Confidence in current state
-        persistence = float(model.transmat_[current_state, current_state])
-        
-        bullish_state = np.argmax(model.means_.flatten())
-        regime = "Bullish" if current_state == bullish_state else "Bearish"
-
-        # Recommendation Logic
-        rec = get_recommendation(regime, rsi, macd, signal, prev_macd, prev_signal, volume_is_high)
-
-        return {
-            "regime": regime, 
-            "persistence": round(persistence, 2),
-            "probability": round(current_prob, 4), # Added Probability Score
-            "rsi": round(rsi, 2), 
-            "macd": round(macd, 2),
-            "volume_confirmed": volume_is_high,
-            "price": float(df['Close'].iloc[-1]),
-            "year_high": float(df['Close'].max()),
-            "year_low": float(df['Close'].min()),
-            "recommendation": rec
-        }
-    except Exception as e:
-        return {"regime": "Error", "details": str(e)}
-
-@app.post("/analyze")
-async def analyze(request: Request):
-    try:
-        payload = await request.json()
-        
-        if isinstance(payload, dict) and "data" in payload:
-            data_to_process = payload["data"]
-        elif isinstance(payload, list):
-            data_to_process = payload
-        else:
-            return {"regime": "Error", "details": "Invalid payload structure"}
-
-        if not data_to_process or len(data_to_process) < 30:
-            return {"regime": "Error", "details": "Insufficient data"}
-
-        df = pd.DataFrame(data_to_process)
-        df.rename(columns={'close': 'Close', 'volume': 'Volume'}, inplace=True)
-        
-        return run_math(df)
-        
-    except Exception as e:
-        return {"regime": "Error", "details": f"Caught exception: {str(e)}"}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

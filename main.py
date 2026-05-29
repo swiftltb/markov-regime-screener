@@ -58,23 +58,26 @@ def run_math(df):
 
 @app.post("/analyze")
 async def analyze(request: Request):
-    payload = await request.json()
-    
-    # 1. Handle the nested structure from FMP's /stable/ endpoint
-    # FMP returns {"symbol": "...", "historical": [...]}
-    if isinstance(payload, dict):
-        # Extract the list of records
-        records = payload.get("historical", [])
-        # Extract only the 'close' values
-        data_to_process = [item["close"] for item in records if "close" in item]
-    elif isinstance(payload, list):
-        data_to_process = payload
-    else:
-        return {"regime": "Error", "details": "Unknown data format"}
+    try:
+        payload = await request.json()
+        
+        # LOGGING: See exactly what we got
+        print(f"DEBUG: Payload Type: {type(payload)}")
+        
+        # Scenario 1: It's the {"data": [...]} dictionary
+        if isinstance(payload, dict) and "data" in payload:
+            data_to_process = payload["data"]
+        # Scenario 2: It's a raw list
+        elif isinstance(payload, list):
+            data_to_process = payload
+        else:
+            return {"regime": "Error", "details": f"Unknown format: {str(payload)[:50]}"}
 
-    # 2. Safety check: Ensure we have data before creating the DataFrame
-    if not data_to_process:
-        return {"regime": "Error", "details": "No price data found in response"}
+        if not data_to_process or len(data_to_process) == 0:
+            return {"regime": "Error", "details": "Payload is empty"}
 
-    df = pd.DataFrame(data_to_process, columns=["Close"])
-    return run_math(df)
+        df = pd.DataFrame(data_to_process, columns=["Close"])
+        return run_math(df)
+        
+    except Exception as e:
+        return {"regime": "Error", "details": f"Caught exception: {str(e)}"}

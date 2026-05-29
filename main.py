@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
 from hmmlearn import hmm
-import gc
 
 app = FastAPI()
 
@@ -14,7 +13,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Health Check (Matches Dashboard Path /)
+def get_recommendation(regime, rsi, macd, signal, prev_macd, prev_signal, volume_is_high):
+    # Detect Crossovers
+    bullish_crossover = (prev_macd <= prev_signal) and (macd > signal)
+    bearish_crossover = (prev_macd >= prev_signal) and (macd < signal)
+
+    if regime == "Bullish":
+        if rsi < 30 and bullish_crossover and volume_is_high: return "Strong Buy"
+        if rsi < 50 and bullish_crossover: return "Buy"
+        return "Hold"
+    else: # Bearish Regime
+        if rsi > 70 and bearish_crossover and volume_is_high: return "Strong Sell"
+        if rsi > 50 and bearish_crossover: return "Sell"
+        return "Hold"
+
+# 1. Health Check
 @app.get("/")
 async def root():
     return {"status": "online", "message": "Compute Engine Ready"}
@@ -29,9 +42,21 @@ def run_math(df):
         rs = gain / loss
         rsi = float(100 - (100 / (1 + rs.iloc[-1])))
         
+        # MACD & Signal Line
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
         exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-        macd = float((exp1 - exp2).iloc[-1])
+        macd_line = exp1 - exp2
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        
+        # Volume Confirmation
+        avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
+        volume_is_high = float(df['Volume'].iloc[-1]) > float(avg_vol)
+        
+        # Current and Previous values for Crossover
+        macd = float(macd_line.iloc[-1])
+        signal = float(signal_line.iloc[-1])
+        prev_macd = float(macd_line.iloc[-2])
+        prev_signal = float(signal_line.iloc[-2])
 
         # HMM Regime Detection
         returns = df['Close'].pct_change().dropna().values.reshape(-1, 1)
@@ -44,14 +69,19 @@ def run_math(df):
         bullish_state = np.argmax(model.means_.flatten())
         regime = "Bullish" if current_state == bullish_state else "Bearish"
 
+        # Recommendation Logic
+        rec = get_recommendation(regime, rsi, macd, signal, prev_macd, prev_signal, volume_is_high)
+
         return {
             "regime": regime, 
             "persistence": round(persistence, 2),
             "rsi": round(rsi, 2), 
             "macd": round(macd, 2),
+            "volume_confirmed": volume_is_high,
             "price": float(df['Close'].iloc[-1]),
             "year_high": float(df['Close'].max()),
-            "year_low": float(df['Close'].min())
+            "year_low": float(df['Close'].min()),
+            "recommendation": rec
         }
     except Exception as e:
         return {"regime": "Error", "details": str(e)}
@@ -61,22 +91,21 @@ async def analyze(request: Request):
     try:
         payload = await request.json()
         
-        # LOGGING: See exactly what we got
-        print(f"DEBUG: Payload Type: {type(payload)}")
-        
-        # Scenario 1: It's the {"data": [...]} dictionary
+        # Handle dict or list payload
         if isinstance(payload, dict) and "data" in payload:
             data_to_process = payload["data"]
-        # Scenario 2: It's a raw list
         elif isinstance(payload, list):
             data_to_process = payload
         else:
-            return {"regime": "Error", "details": f"Unknown format: {str(payload)[:50]}"}
+            return {"regime": "Error", "details": "Invalid payload structure"}
 
-        if not data_to_process or len(data_to_process) == 0:
-            return {"regime": "Error", "details": "Payload is empty"}
+        if not data_to_process or len(data_to_process) < 30:
+            return {"regime": "Error", "details": "Insufficient data"}
 
-        df = pd.DataFrame(data_to_process, columns=["Close"])
+        # Expected keys: 'close' and 'volume'
+        df = pd.DataFrame(data_to_process)
+        df.rename(columns={'close': 'Close', 'volume': 'Volume'}, inplace=True)
+        
         return run_math(df)
         
     except Exception as e:

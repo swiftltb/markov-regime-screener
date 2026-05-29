@@ -8,7 +8,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://stockscreen.art"],
+    allow_origins=["https://stockscreen.art", "https://www.stockscreen.art"],
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
@@ -52,7 +52,7 @@ def run_math(df):
         avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
         volume_is_high = float(df['Volume'].iloc[-1]) > float(avg_vol)
         
-        # Current and Previous values for Crossover
+        # Current and Previous values
         macd = float(macd_line.iloc[-1])
         signal = float(signal_line.iloc[-1])
         prev_macd = float(macd_line.iloc[-2])
@@ -64,8 +64,14 @@ def run_math(df):
         model = hmm.GaussianHMM(n_components=2, covariance_type="full", n_iter=100)
         model.fit(data_subset)
         
-        current_state = model.predict(data_subset)[-1]
+        # Predict state and get probabilities
+        states = model.predict(data_subset)
+        probs = model.predict_proba(data_subset)
+        
+        current_state = states[-1]
+        current_prob = float(probs[-1, current_state]) # Confidence in current state
         persistence = float(model.transmat_[current_state, current_state])
+        
         bullish_state = np.argmax(model.means_.flatten())
         regime = "Bullish" if current_state == bullish_state else "Bearish"
 
@@ -75,6 +81,7 @@ def run_math(df):
         return {
             "regime": regime, 
             "persistence": round(persistence, 2),
+            "probability": round(current_prob, 4), # Added Probability Score
             "rsi": round(rsi, 2), 
             "macd": round(macd, 2),
             "volume_confirmed": volume_is_high,
@@ -91,7 +98,6 @@ async def analyze(request: Request):
     try:
         payload = await request.json()
         
-        # Handle dict or list payload
         if isinstance(payload, dict) and "data" in payload:
             data_to_process = payload["data"]
         elif isinstance(payload, list):
@@ -102,7 +108,6 @@ async def analyze(request: Request):
         if not data_to_process or len(data_to_process) < 30:
             return {"regime": "Error", "details": "Insufficient data"}
 
-        # Expected keys: 'close' and 'volume'
         df = pd.DataFrame(data_to_process)
         df.rename(columns={'close': 'Close', 'volume': 'Volume'}, inplace=True)
         

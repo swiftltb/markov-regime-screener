@@ -17,7 +17,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# --- Add the Health Check HERE ---
+@app.get("/")
+async def root():
+    return {"status": "Engine Operational"}
 
+# --- Then your existing functions follow ---
+def calculate_rsi(data, window=14):
 # --- Indicator Calculations ---
 def calculate_rsi(data, window=14):
     delta = data.diff()

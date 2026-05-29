@@ -60,14 +60,21 @@ def run_math(df):
 async def analyze(request: Request):
     payload = await request.json()
     
-    # Check if payload is a dict (has "data" key) or a direct list
-    if isinstance(payload, dict) and "data" in payload:
-        data_to_process = payload["data"]
+    # 1. Handle the nested structure from FMP's /stable/ endpoint
+    # FMP returns {"symbol": "...", "historical": [...]}
+    if isinstance(payload, dict):
+        # Extract the list of records
+        records = payload.get("historical", [])
+        # Extract only the 'close' values
+        data_to_process = [item["close"] for item in records if "close" in item]
     elif isinstance(payload, list):
         data_to_process = payload
     else:
-        # Fallback if structure is unknown
-        return {"regime": "Error", "details": "Invalid payload format"}
+        return {"regime": "Error", "details": "Unknown data format"}
+
+    # 2. Safety check: Ensure we have data before creating the DataFrame
+    if not data_to_process:
+        return {"regime": "Error", "details": "No price data found in response"}
 
     df = pd.DataFrame(data_to_process, columns=["Close"])
     return run_math(df)
